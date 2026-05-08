@@ -3621,6 +3621,73 @@ def create_app():
             if changed:
                 save_template4_scenes(template_dir, scenes)
 
+    def resume_pending_avatar_jobs():
+        try:
+            client = redis_client()
+        except Exception as exc:
+            app.logger.warning("Avatar recovery skipped: Redis unavailable (%s)", exc)
+            return
+
+        queue_name = app.config["AVATAR_QUEUE_NAME"]
+        queued_avatar_ids = set()
+        try:
+            for raw_payload in client.lrange(queue_name, 0, -1):
+                try:
+                    payload = json.loads(raw_payload)
+                except Exception:
+                    continue
+                avatar_id = int(payload.get("avatar_id", 0) or 0)
+                if avatar_id:
+                    queued_avatar_ids.add(avatar_id)
+        except Exception as exc:
+            app.logger.warning("Avatar recovery skipped: failed to inspect Redis queue (%s)", exc)
+            return
+
+        requeued = 0
+        normalized = 0
+        with app.app_context():
+            pending_avatars = CartoonAvatar.query.filter_by(status="pending").all()
+            for avatar in pending_avatars:
+                if avatar.image_url:
+                    avatar.status = "completed"
+                    avatar.task_id = None
+                    normalized += 1
+                    continue
+
+                task_id = str(avatar.task_id or "").strip()
+                if task_id and not task_id.startswith("redis:"):
+                    continue
+                if avatar.id in queued_avatar_ids:
+                    continue
+
+                try:
+                    job_id = enqueue_avatar_job(avatar.id)
+                    avatar.task_id = f"redis:{job_id}"
+                    requeued += 1
+                    app.logger.info(
+                        "Requeued pending avatar avatar=%d child=%d style=%s",
+                        avatar.id,
+                        avatar.child_id,
+                        avatar.style_name,
+                    )
+                except Exception as exc:
+                    app.logger.error(
+                        "Failed to requeue pending avatar avatar=%d child=%d style=%s: %s",
+                        avatar.id,
+                        avatar.child_id,
+                        avatar.style_name,
+                        exc,
+                    )
+            if requeued or normalized:
+                db.session.commit()
+        if requeued or normalized:
+            app.logger.info(
+                "Avatar recovery finished: requeued=%d normalized=%d queued_in_redis=%d",
+                requeued,
+                normalized,
+                len(queued_avatar_ids),
+            )
+
     def ensure_avatar_worker_started():
         nonlocal avatar_worker_started
         with avatar_worker_lock:
@@ -7620,6 +7687,7 @@ def create_app():
 
     ensure_template4_worker_started()
     resume_template4_processing_jobs()
+    resume_pending_avatar_jobs()
     ensure_avatar_worker_started()
 
     return app
