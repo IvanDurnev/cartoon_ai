@@ -2,7 +2,7 @@ import multiprocessing
 import os
 
 
-bind = os.getenv("GUNICORN_BIND", "127.0.0.1:8000")
+bind = os.getenv("GUNICORN_BIND", "127.0.0.1:8001")
 
 # This app starts background queue workers inside the web process, so we keep
 # a single Gunicorn worker process to avoid duplicating those workers.
