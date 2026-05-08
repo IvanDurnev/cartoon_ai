@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+{% block title %}Создать мультик — Cartoon AI{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+  <a href="{{ url_for('cartoons_list') }}" class="text-muted text-decoration-none small">
+    <i class="bi bi-arrow-left me-1"></i>Назад к мультикам
+  </a>
+</div>
+
+<h2 class="fw-bold mb-4"><i class="bi bi-magic me-2" style="color:#7c3aed;"></i>Создать мультик</h2>
+
+<form method="POST" action="{{ url_for('create_cartoon') }}" id="createForm">
+
+  {# ── Step 1: Children ── #}
+  <div class="card mb-4">
+    <div class="card-header py-3" style="background:linear-gradient(90deg,#7c3aed,#a855f7);">
+      <h5 class="mb-0 text-white fw-semibold">
+        <span class="badge bg-white me-2" style="color:#7c3aed;">1</span>
+        Выберите детей
+      </h5>
+    </div>
+    <div class="card-body">
+      {% if children %}
+        <div class="row g-3">
+          {% for child in children %}
+          <div class="col-6 col-sm-4 col-md-3">
+            <label class="w-100 h-100" style="cursor:pointer;">
+              <input type="checkbox" name="child_ids" value="{{ child.id }}"
+                     class="d-none child-check" data-card="child-card-{{ child.id }}">
+              <div class="card text-center p-3 h-100 selectable-card" id="child-card-{{ child.id }}">
+                {% if child.selected_avatar and child.selected_avatar.image_url %}
+                  <img src="{{ child.selected_avatar.image_url }}"
+                       class="rounded-circle mx-auto mb-2"
+                       style="width:64px;height:64px;object-fit:cover;border:3px solid #e9d5ff;">
+                {% else %}
+                  <div class="rounded-circle mx-auto mb-2 d-flex align-items-center justify-content-center"
+                       style="width:64px;height:64px;background:#f3f0ff;border:3px solid #e9d5ff;">
+                    <i class="bi bi-person-fill fs-4" style="color:#a78bfa;"></i>
+                  </div>
+                {% endif %}
+                <div class="fw-semibold small text-dark">{{ child.name }}</div>
+                <div class="check-icon mt-1" style="display:none;">
+                  <i class="bi bi-check-circle-fill" style="color:#7c3aed;"></i>
+                </div>
+              </div>
+            </label>
+          </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="text-center py-3 text-muted">
+          <i class="bi bi-people fs-3 d-block mb-2"></i>
+          Нет добавленных детей.
+          <a href="{{ url_for('index') }}">Добавить ребёнка</a>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ── Step 2: Characters ── #}
+  <div class="card mb-4">
+    <div class="card-header py-3" style="background:linear-gradient(90deg,#7c3aed,#a855f7);">
+      <h5 class="mb-0 text-white fw-semibold">
+        <span class="badge bg-white me-2" style="color:#7c3aed;">2</span>
+        Выберите персонажей
+        <small class="fw-normal opacity-75 ms-2">(необязательно)</small>
+      </h5>
+    </div>
+    <div class="card-body">
+      {% if characters %}
+        <div class="row g-3">
+          {% for char in characters %}
+          <div class="col-6 col-sm-4 col-md-3">
+            <label class="w-100 h-100" style="cursor:pointer;">
+              <input type="checkbox" name="character_ids" value="{{ char.id }}"
+                     class="d-none char-check" data-card="char-card-{{ char.id }}">
+              <div class="card text-center p-3 h-100 selectable-card" id="char-card-{{ char.id }}">
+                {% if char.image_filename %}
+                  <img src="{{ url_for('static', filename='uploads/' ~ char.image_filename) }}"
+                       class="rounded-circle mx-auto mb-2"
+                       style="width:64px;height:64px;object-fit:cover;border:3px solid #e9d5ff;">
+                {% else %}
+                  <div class="rounded-circle mx-auto mb-2 d-flex align-items-center justify-content-center"
+                       style="width:64px;height:64px;background:#f3f0ff;border:3px solid #e9d5ff;">
+                    <i class="bi bi-person-badge fs-4" style="color:#a78bfa;"></i>
+                  </div>
+                {% endif %}
+                <div class="fw-semibold small text-dark">{{ char.name }}</div>
+                {% if char.description %}
+                  <div class="text-muted" style="font-size:.7rem;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">
+                    {{ char.description }}
+                  </div>
+                {% endif %}
+                <div class="check-icon mt-1" style="display:none;">
+                  <i class="bi bi-check-circle-fill" style="color:#7c3aed;"></i>
+                </div>
+              </div>
+            </label>
+          </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="text-center py-3 text-muted">
+          <i class="bi bi-person-badge fs-3 d-block mb-2"></i>
+          Нет добавленных персонажей.
+          <a href="{{ url_for('characters') }}">Добавить персонажа</a>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ── Step 3: Story idea ── #}
+  <div class="card mb-4">
+    <div class="card-header py-3" style="background:linear-gradient(90deg,#7c3aed,#a855f7);">
+      <h5 class="mb-0 text-white fw-semibold">
+        <span class="badge bg-white me-2" style="color:#7c3aed;">3</span>
+        Опишите историю
+      </h5>
+    </div>
+    <div class="card-body">
+      <textarea
+        name="story_prompt"
+        class="form-control"
+        rows="4"
+        placeholder="Например: Маша находит в лесу маленького дракончика, который потерялся и не может найти свой домик. Вместе они отправляются в приключение через волшебный лес…"
+        required
+        style="resize:vertical;border-radius:12px;font-size:.95rem;"
+      ></textarea>
+      <div class="form-text mt-2">
+        <i class="bi bi-lightbulb me-1 text-warning"></i>
+        Опишите основную идею — ИИ сам придумает сцены, диалоги и визуальные детали.
+      </div>
+    </div>
+  </div>
+
+  {# ── Generate button ── #}
+  <div class="d-grid">
+    <button type="submit" class="btn btn-primary btn-lg py-3" id="generateBtn">
+      <i class="bi bi-stars me-2"></i>Сгенерировать историю
+    </button>
+  </div>
+
+  {# Loading overlay #}
+  <div id="loadingOverlay" class="text-center py-4 mt-3" style="display:none;">
+    <div class="spinner-border mb-3" style="width:3rem;height:3rem;color:#7c3aed;"></div>
+    <p class="fw-semibold text-muted mb-1">Придумываем историю…</p>
+    <p class="text-muted small">Обычно занимает 10–20 секунд</p>
+  </div>
+
+</form>
+{% endblock %}
+
+{% block scripts %}
+<style>
+  .selectable-card {
+    border: 2px solid transparent !important;
+    transition: border-color .15s, box-shadow .15s, transform .15s;
+  }
+  .selectable-card:hover {
+    border-color: #a855f7 !important;
+    box-shadow: 0 4px 16px rgba(124,58,237,.2);
+    transform: translateY(-2px);
+  }
+  .selectable-card.selected {
+    border-color: #7c3aed !important;
+    background: #faf5ff;
+    box-shadow: 0 4px 16px rgba(124,58,237,.25);
+  }
+</style>
+<script>
+  // Toggle card selection
+  document.querySelectorAll('.child-check, .char-check').forEach(function(checkbox) {
+    checkbox.addEventListener('change', function() {
+      var card = document.getElementById(this.dataset.card);
+      var icon = card.querySelector('.check-icon');
+      if (this.checked) {
+        card.classList.add('selected');
+        icon.style.display = '';
+      } else {
+        card.classList.remove('selected');
+        icon.style.display = 'none';
+      }
+    });
+  });
+
+  // Show loading on submit
+  document.getElementById('createForm').addEventListener('submit', function() {
+    var btn = document.getElementById('generateBtn');
+    var overlay = document.getElementById('loadingOverlay');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Генерируем…';
+    overlay.style.display = '';
+  });
+</script>
+{% endblock %}

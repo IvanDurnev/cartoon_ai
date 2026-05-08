@@ -1,0 +1,284 @@
+{% extends "base.html" %}
+{% block title %}{{ child.name }} — Cartoon AI{% endblock %}
+
+{% block content %}
+<div class="mb-3">
+  <a href="{{ url_for('index') }}" class="text-decoration-none text-muted">
+    <i class="bi bi-arrow-left"></i> Все дети
+  </a>
+</div>
+
+{# ---- Child header ---- #}
+<div class="card mb-4">
+  <div class="card-body d-flex align-items-center gap-4 flex-wrap">
+    <img src="{{ url_for('static', filename='uploads/' + child.photo_filename) }}"
+         class="child-photo-lg flex-shrink-0" alt="{{ child.name }}">
+    <div class="flex-grow-1">
+      <h3 class="mb-1">{{ child.name }}</h3>
+      <div class="text-muted small">Добавлен {{ child.created_at.strftime('%d.%m.%Y') }}</div>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+      {% if not child.has_pending_generation %}
+        <form method="POST" action="{{ url_for('generate_avatars', child_id=child.id) }}">
+          <button type="submit" class="btn btn-primary">
+            <i class="bi bi-magic me-1"></i>
+            {% if child.avatars %}Перегенерировать{% else %}Создать мульт-аватар{% endif %}
+          </button>
+        </form>
+      {% else %}
+        <button class="btn btn-secondary" disabled id="gen-btn">
+          <span class="spinner-border spinner-border-sm me-1"></span> Генерация…
+        </button>
+      {% endif %}
+      <form method="POST" action="{{ url_for('delete_child', child_id=child.id) }}"
+            onsubmit="return confirm('Удалить ребёнка и все аватары?')">
+        <button type="submit" class="btn btn-outline-danger">
+          <i class="bi bi-trash"></i>
+        </button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header bg-white py-3">
+    <h6 class="mb-0"><i class="bi bi-mic-fill me-1" style="color:#7c3aed"></i> Голос ребёнка (ElevenLabs)</h6>
+  </div>
+  <div class="card-body">
+    <form method="POST" action="{{ url_for('update_child_voice', child_id=child.id) }}" class="row g-2 align-items-end">
+      <div class="col-md-9">
+        <label class="form-label fw-semibold">Голос</label>
+        <select name="voice_id" class="form-select" id="childVoiceIdInput">
+          <option value="">Не выбрано</option>
+          {% set voice_ids = voice_options | map(attribute='id') | list %}
+          {% for v in voice_options %}
+          <option value="{{ v.id }}" {% if child.voice_id == v.id %}selected{% endif %}>
+            {{ v.name }} — {{ v.id }}
+          </option>
+          {% endfor %}
+          {% if child.voice_id and child.voice_id not in voice_ids %}
+          <option value="{{ child.voice_id }}" selected>Текущий (custom) — {{ child.voice_id }}</option>
+          {% endif %}
+        </select>
+      </div>
+      <div class="col-md-3 d-grid">
+        <label class="form-label fw-semibold d-none d-md-block">&nbsp;</label>
+        <button type="submit" class="btn btn-primary">
+          <i class="bi bi-check-lg me-1"></i>Сохранить
+        </button>
+      </div>
+      <div class="col-12">
+        <div class="form-text">Введите Voice ID и нажмите «Прослушать», чтобы проверить голос.</div>
+      </div>
+      <div class="col-md-9">
+        <label class="form-label fw-semibold">Текст для предпрослушивания</label>
+        <input type="text" class="form-control" id="childVoicePreviewText"
+               value="Привет! Я готов к приключениям в волшебном лесу.">
+      </div>
+      <div class="col-md-3 d-grid">
+        <button type="button" class="btn btn-outline-secondary" id="childPreviewBtn">
+          <i class="bi bi-play-circle me-1"></i>Прослушать
+        </button>
+      </div>
+    </form>
+    <audio id="childVoicePreviewAudio" controls class="w-100 mt-3" style="display:none;"></audio>
+  </div>
+</div>
+
+{# ---- Avatars section ---- #}
+{% if child.avatars %}
+<h5 class="mb-3 fw-semibold">Мультяшные аватары</h5>
+
+{% if child.selected_avatar %}
+<div class="alert alert-success d-flex align-items-center gap-2 mb-4" id="selected-banner">
+  <i class="bi bi-check-circle-fill fs-5"></i>
+  <span>Выбран аватар в стиле <strong>{{ child.selected_avatar.style_name }}</strong></span>
+</div>
+{% endif %}
+
+<div class="row g-4" id="avatars-container">
+  {% for avatar in child.avatars %}
+  <div class="col-sm-6 col-md-4" id="avatar-col-{{ avatar.id }}">
+    {{ render_avatar_card(avatar, child.id) }}
+  </div>
+  {% endfor %}
+</div>
+
+{% elif not child.has_pending_generation %}
+<div class="text-center py-5 text-muted">
+  <i class="bi bi-palette2" style="font-size:3rem;color:#c4b5fd"></i>
+  <p class="mt-3">Аватары ещё не созданы.<br>Нажмите «Создать мульт-аватар» выше!</p>
+</div>
+{% endif %}
+{% endblock %}
+
+{# ---- reusable macro for a single avatar card (used by Jinja + JS template) ---- #}
+{% macro render_avatar_card(avatar, child_id) %}
+<div class="card h-100 avatar-card {% if avatar.is_selected %}selected{% endif %}"
+     id="avatar-card-{{ avatar.id }}">
+  <div class="card-body p-3">
+    <div class="mb-2">
+      {% if avatar.status == 'completed' and avatar.image_url %}
+        <img src="{{ avatar.image_url }}" class="avatar-img" alt="{{ avatar.style_name }}">
+      {% elif avatar.status == 'failed' %}
+        <div class="pending-placeholder">
+          <div class="text-center">
+            <i class="bi bi-exclamation-circle fs-2"></i>
+            <div class="mt-1 small">Ошибка генерации</div>
+          </div>
+        </div>
+      {% else %}
+        <div class="pending-placeholder">
+          <div class="text-center">
+            <span class="spinner-border" style="color:#a78bfa"></span>
+            <div class="mt-2 small text-muted">Генерируется…</div>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+    <div class="d-flex align-items-center justify-content-between mt-2">
+      <span class="fw-semibold">{{ avatar.style_name }}</span>
+      {% if avatar.status == 'completed' and avatar.image_url %}
+        {% if avatar.is_selected %}
+          <span class="badge bg-success"><i class="bi bi-check-lg"></i> Выбран</span>
+        {% else %}
+          <form method="POST"
+                action="{{ url_for('select_avatar', child_id=child_id, avatar_id=avatar.id) }}">
+            <button type="submit" class="btn btn-sm btn-outline-primary">Выбрать</button>
+          </form>
+        {% endif %}
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endmacro %}
+
+{% block scripts %}
+<script>
+  (function () {
+    const btn = document.getElementById("childPreviewBtn");
+    const voiceInput = document.getElementById("childVoiceIdInput");
+    const textInput = document.getElementById("childVoicePreviewText");
+    const audio = document.getElementById("childVoicePreviewAudio");
+    if (!btn || !voiceInput || !textInput || !audio) return;
+
+    btn.addEventListener("click", async () => {
+      const voiceId = voiceInput.value.trim();
+      const text = textInput.value.trim();
+      if (!voiceId) {
+        alert("Укажите Voice ID для предпрослушивания.");
+        return;
+      }
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Генерируем...';
+      try {
+        const formData = new FormData();
+        formData.append("voice_id", voiceId);
+        formData.append("text", text);
+        const resp = await fetch("/api/voice-preview", { method: "POST", body: formData });
+        if (!resp.ok) throw new Error("preview failed");
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        audio.src = url;
+        audio.style.display = "";
+        await audio.play();
+      } catch (_) {
+        alert("Не удалось сгенерировать предпрослушивание. Проверьте Voice ID и ElevenLabs API key.");
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-play-circle me-1"></i>Прослушать';
+      }
+    });
+  })();
+</script>
+{% if child.has_pending_generation %}
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+  const CHILD_ID = {{ child.id }};
+  const socket = io();
+
+  socket.on("connect", () => {
+    socket.emit("watch_child", { child_id: CHILD_ID });
+  });
+
+  socket.on("avatar_ready", (avatar) => {
+    applyAvatarUpdate(avatar);
+  });
+
+  function applyAvatarUpdate(avatar) {
+    const col = document.getElementById(`avatar-col-${avatar.id}`);
+    if (!col) return;
+
+    if (avatar.status === "completed" && avatar.image_url) {
+      col.innerHTML = completedCard(avatar);
+    } else if (avatar.status === "failed") {
+      col.innerHTML = failedCard(avatar);
+    }
+
+    // If all avatars are no longer pending — swap the Generate button
+    const pendingCount = document.querySelectorAll(".pending-placeholder .spinner-border").length;
+    if (pendingCount === 0) {
+      const btn = document.getElementById("gen-btn");
+      if (btn) {
+        btn.outerHTML = `
+          <form method="POST" action="/children/${CHILD_ID}/generate">
+            <button type="submit" class="btn btn-primary">
+              <i class="bi bi-magic me-1"></i> Перегенерировать
+            </button>
+          </form>`;
+      }
+      clearInterval(syncInterval);
+      socket.emit("unwatch_child", { child_id: CHILD_ID });
+      socket.disconnect();
+    }
+  }
+
+  // Recovery: re-fetch status from aivideoapi for any still-pending avatars.
+  // Runs immediately on load, then every 15 s.
+  // Server emits avatar_ready via socket if anything changed, so DOM updates automatically.
+  function sync() {
+    const pendingNow = document.querySelectorAll(".pending-placeholder .spinner-border").length;
+    if (pendingNow === 0) {
+      clearInterval(syncInterval);
+      return;
+    }
+    fetch(`/api/children/${CHILD_ID}/sync`).catch(() => {});
+  }
+
+  sync(); // immediate check on page load
+  const syncInterval = setInterval(sync, 15_000);
+
+  function completedCard(av) {
+    return `
+      <div class="card h-100 avatar-card" id="avatar-card-${av.id}">
+        <div class="card-body p-3">
+          <div class="mb-2">
+            <img src="${av.image_url}" class="avatar-img" alt="${av.style_name}">
+          </div>
+          <div class="d-flex align-items-center justify-content-between mt-2">
+            <span class="fw-semibold">${av.style_name}</span>
+            <form method="POST" action="/children/${CHILD_ID}/select/${av.id}">
+              <button type="submit" class="btn btn-sm btn-outline-primary">Выбрать</button>
+            </form>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function failedCard(av) {
+    return `
+      <div class="card h-100 avatar-card" id="avatar-card-${av.id}">
+        <div class="card-body p-3">
+          <div class="pending-placeholder mb-2">
+            <div class="text-center">
+              <i class="bi bi-exclamation-circle fs-2"></i>
+              <div class="mt-1 small">Ошибка генерации</div>
+            </div>
+          </div>
+          <div class="mt-2 fw-semibold">${av.style_name}</div>
+        </div>
+      </div>`;
+  }
+</script>
+{% endif %}
+{% endblock %}

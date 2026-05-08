@@ -1,0 +1,384 @@
+{% extends "base.html" %}
+{% block title %}Шаблон 2 {{ template_name }} — Cartoon AI{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+  <a href="{{ url_for('templates2_list') }}" class="text-muted text-decoration-none small">
+    <i class="bi bi-arrow-left me-1"></i>Назад к шаблонам 2
+  </a>
+</div>
+
+<div class="d-flex align-items-center justify-content-between mb-3 gap-2 flex-wrap">
+  <h2 class="fw-bold mb-0">
+    <i class="bi bi-folder2-open me-2"></i>{{ template_name }}
+  </h2>
+  <div class="d-flex align-items-center gap-2">
+    <span class="badge" style="background:#f3f0ff;color:#7c3aed;">
+      {{ fragments|length }} фрагментов
+    </span>
+    <span class="badge text-bg-info-subtle border border-info-subtle text-info-emphasis">
+      Провайдер: ElevenLabs Creative
+    </span>
+    <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-check-elevenlabs-access">
+      <i class="bi bi-shield-check me-1"></i>Проверить доступ API
+    </button>
+  </div>
+</div>
+<div id="elevenlabs-access-result" class="alert py-2 px-3 d-none" role="alert"></div>
+
+{% if fragments %}
+  <div class="d-flex flex-column gap-3">
+    {% for fragment in fragments %}
+      <div class="card" id="fragment-{{ loop.index }}" data-file-name="{{ fragment.name }}">
+        <div class="card-body">
+          <div class="d-flex align-items-center justify-content-between mb-2">
+            <div class="fw-semibold">
+              <span class="badge me-2" style="background:#7c3aed;color:#fff;">{{ loop.index }}</span>
+              {{ fragment.name }}
+            </div>
+            <a href="{{ fragment.url }}" target="_blank" class="small text-decoration-none">Открыть файл</a>
+          </div>
+
+          {% if fragment.media_type == "video" %}
+            <div class="rounded overflow-hidden position-relative" style="background:#000;">
+              <video controls preload="metadata" class="w-100 js-scene-video" style="max-height:360px;" poster="">
+                <source src="{{ fragment.url }}">
+                Ваш браузер не поддерживает видео.
+              </video>
+              <div class="position-absolute top-0 start-0 w-100 h-100 pe-none js-mask-overlay"></div>
+            </div>
+            <div class="mt-2 small text-muted js-mask-meta">
+              {% if fragment.detected_masks %}
+                Ключевой кадр: {{ fragment.detected_keyframe_id or "?" }}.
+              {% else %}
+                Маски ещё не определены для этого фрагмента.
+              {% endif %}
+              Для явного выбора маски добавьте в промпт токен вида <code>{mask:MASK_ID}</code>.
+            </div>
+            <div class="mt-1 small js-mask-badges"></div>
+            <form method="POST"
+                  action="{{ url_for('save_template2_fragment_prompt', template_name=template_name) }}"
+                  class="mt-3">
+              <input type="hidden" name="file_name" value="{{ fragment.name }}">
+              <label class="form-label fw-semibold mb-1">Промпт для сцены</label>
+              <textarea name="prompt"
+                        class="form-control"
+                        rows="3"
+                        placeholder="Опишите, что нужно сделать с этой сценой...">{{ fragment.prompt }}</textarea>
+              <div class="d-flex justify-content-end mt-2 gap-2">
+                <button type="submit"
+                        formaction="{{ url_for('detect_template2_masks', template_name=template_name) }}"
+                        class="btn btn-outline-primary btn-sm">
+                  <i class="bi bi-bounding-box-circles me-1"></i>Определить маски
+                </button>
+                <button type="submit" class="btn btn-primary btn-sm">
+                  <i class="bi bi-save me-1"></i>Сохранить промпт
+                </button>
+                <button type="submit"
+                        formaction="{{ url_for('apply_template2_fragment_prompt', template_name=template_name) }}"
+                        class="btn btn-success btn-sm">
+                  <i class="bi bi-magic me-1"></i>Применить промпт
+                </button>
+              </div>
+            </form>
+
+            {% set job = fragment.job or {} %}
+            <div class="mt-2 small js-job-status" {% if not job %}style="display:none;"{% endif %}>
+              <span class="js-job-badge">
+                {% if job.status == "queued" %}
+                  <span class="badge bg-secondary">В очереди</span>
+                {% elif job.status == "processing" %}
+                  <span class="badge bg-warning text-dark">Обрабатывается</span>
+                {% elif job.status == "completed" %}
+                  <span class="badge bg-success">Готово</span>
+                {% elif job.status == "failed" %}
+                  <span class="badge bg-danger">Ошибка</span>
+                {% else %}
+                  <span class="badge bg-secondary">{{ job.status }}</span>
+                {% endif %}
+              </span>
+              <span class="text-muted ms-2 js-job-updated">
+                {% if job.updated_at %}
+                  Обновлено: {{ job.updated_at }}
+                {% endif %}
+              </span>
+              <div class="text-muted mt-1 js-job-message">
+                {% if job.message %}
+                  {{ job.message }}
+                {% endif %}
+              </div>
+            </div>
+
+            <div class="mt-3 js-job-result" {% if not (job and job.output_url) %}style="display:none;"{% endif %}>
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                  <span class="fw-semibold text-success">
+                    <i class="bi bi-check2-circle me-1"></i>Результат
+                  </span>
+                  <a href="{{ job.output_url if job and job.output_url else '#' }}" target="_blank" class="small text-decoration-none js-job-result-link">Открыть результат</a>
+                </div>
+                <div class="rounded overflow-hidden" style="background:#000;">
+                  <video controls preload="metadata" class="w-100 js-job-result-video" style="max-height:360px;">
+                    <source src="{{ job.output_url if job and job.output_url else '' }}">
+                    Ваш браузер не поддерживает видео.
+                  </video>
+                </div>
+            </div>
+          {% elif fragment.media_type == "audio" %}
+            <audio controls class="w-100">
+              <source src="{{ fragment.url }}">
+              Ваш браузер не поддерживает аудио.
+            </audio>
+          {% elif fragment.media_type == "image" %}
+            <img src="{{ fragment.url }}" alt="{{ fragment.name }}" class="img-fluid rounded border">
+          {% else %}
+            <div class="text-muted small">
+              Предпросмотр для этого типа файла не поддерживается.
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="card text-center py-4">
+    <div class="card-body text-muted">
+      В этом шаблоне пока нет файлов.
+    </div>
+  </div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+  (() => {
+    const templateName = {{ template_name|tojson }};
+    const maskTimelineByFile = {{ mask_timeline_by_file|tojson }};
+    const inFlightMaskRequests = new Map();
+    const accessBtn = document.getElementById('btn-check-elevenlabs-access');
+    const accessResult = document.getElementById('elevenlabs-access-result');
+    const cards = Array.from(document.querySelectorAll('[data-file-name]'));
+    if (!cards.length) return;
+
+    function statusBadgeHtml(status) {
+      if (status === 'queued') return '<span class="badge bg-secondary">В очереди</span>';
+      if (status === 'processing') return '<span class="badge bg-warning text-dark">Обрабатывается</span>';
+      if (status === 'completed') return '<span class="badge bg-success">Готово</span>';
+      if (status === 'failed') return '<span class="badge bg-danger">Ошибка</span>';
+      if (!status) return '';
+      return `<span class="badge bg-secondary">${status}</span>`;
+    }
+
+    function updateCard(card, job) {
+      const statusWrap = card.querySelector('.js-job-status');
+      const badgeEl = card.querySelector('.js-job-badge');
+      const updatedEl = card.querySelector('.js-job-updated');
+      const msgEl = card.querySelector('.js-job-message');
+      const resultWrap = card.querySelector('.js-job-result');
+      const resultLink = card.querySelector('.js-job-result-link');
+      const resultVideo = card.querySelector('.js-job-result-video');
+
+      if (!statusWrap || !badgeEl || !updatedEl || !msgEl || !resultWrap || !resultLink || !resultVideo) {
+        return;
+      }
+
+      if (!job) {
+        statusWrap.style.display = 'none';
+        resultWrap.style.display = 'none';
+        return;
+      }
+
+      statusWrap.style.display = '';
+      badgeEl.innerHTML = statusBadgeHtml(job.status || '');
+      updatedEl.textContent = job.updated_at ? `Обновлено: ${job.updated_at}` : '';
+      msgEl.textContent = job.message || '';
+
+      if (job.output_url) {
+        resultWrap.style.display = '';
+        resultLink.href = job.output_url;
+        const source = resultVideo.querySelector('source');
+        if (source && source.getAttribute('src') !== job.output_url) {
+          source.setAttribute('src', job.output_url);
+          resultVideo.load();
+        }
+      } else {
+        resultWrap.style.display = 'none';
+      }
+    }
+
+    function findCardByFile(fileName) {
+      if (!fileName) return null;
+      return document.querySelector(`[data-file-name="${CSS.escape(fileName)}"]`);
+    }
+
+    function getFrameData(fileName, second) {
+      const timeline = maskTimelineByFile[fileName];
+      if (!timeline) return null;
+      return timeline[String(second)] || null;
+    }
+
+    async function ensureFrameData(fileName, second) {
+      const existing = getFrameData(fileName, second);
+      if (existing) return existing;
+      const reqKey = `${fileName}:${second}`;
+      if (inFlightMaskRequests.has(reqKey)) {
+        return inFlightMaskRequests.get(reqKey);
+      }
+      const p = fetch(
+        `/api/templates2/${encodeURIComponent(templateName)}/mask-second?file_name=${encodeURIComponent(fileName)}&second=${encodeURIComponent(second)}`,
+        { headers: { 'Accept': 'application/json' } }
+      )
+        .then((r) => r.json())
+        .then((data) => {
+          if (!data || !data.ok || !data.frame) return null;
+          if (!maskTimelineByFile[fileName]) maskTimelineByFile[fileName] = {};
+          maskTimelineByFile[fileName][String(second)] = data.frame;
+          return data.frame;
+        })
+        .catch(() => null)
+        .finally(() => {
+          inFlightMaskRequests.delete(reqKey);
+        });
+      inFlightMaskRequests.set(reqKey, p);
+      return p;
+    }
+
+    function renderMaskOverlay(card, second) {
+      const fileName = card.dataset.fileName || '';
+      const frame = getFrameData(fileName, second);
+      const overlay = card.querySelector('.js-mask-overlay');
+      const meta = card.querySelector('.js-mask-meta');
+      const badges = card.querySelector('.js-mask-badges');
+      if (!overlay || !meta || !badges) return;
+
+      overlay.innerHTML = '';
+      badges.innerHTML = '';
+
+      if (!frame || !Array.isArray(frame.masks) || !frame.masks.length) {
+        meta.innerHTML = `Секунда ${second}: маски не найдены. Для явного выбора маски используйте <code>{mask:MASK_ID}</code>.`;
+        return;
+      }
+
+      meta.innerHTML = `Секунда ${second}, keyframe ${frame.keyframe_id || "?"}. Для явного выбора маски используйте <code>{mask:MASK_ID}</code>.`;
+      frame.masks.forEach((m) => {
+        const badge = document.createElement('span');
+        badge.className = 'badge text-bg-light border me-1 mb-1';
+        badge.textContent = `${m.mask_name || 'mask'}: ${m.mask_id || ''}`;
+        badges.appendChild(badge);
+
+        if (!m.bbox) return;
+        const box = document.createElement('div');
+        box.style.position = 'absolute';
+        box.style.left = `${(Number(m.bbox.x || 0) * 100).toFixed(2)}%`;
+        box.style.top = `${(Number(m.bbox.y || 0) * 100).toFixed(2)}%`;
+        box.style.width = `${(Number(m.bbox.w || 0) * 100).toFixed(2)}%`;
+        box.style.height = `${(Number(m.bbox.h || 0) * 100).toFixed(2)}%`;
+        box.style.border = '2px solid rgba(255,255,0,.95)';
+        box.style.boxShadow = '0 0 0 1px rgba(0,0,0,.35) inset';
+        box.style.background = 'rgba(255,255,0,.08)';
+
+        const label = document.createElement('div');
+        label.style.position = 'absolute';
+        label.style.left = '0';
+        label.style.top = '0';
+        label.style.transform = 'translateY(-100%)';
+        label.style.background = 'rgba(0,0,0,.78)';
+        label.style.color = '#fff';
+        label.style.padding = '2px 6px';
+        label.style.fontSize = '11px';
+        label.style.lineHeight = '1.2';
+        label.style.whiteSpace = 'nowrap';
+        label.textContent = `${m.mask_name || 'mask'} (${m.mask_id || ''})`;
+        box.appendChild(label);
+        overlay.appendChild(box);
+      });
+    }
+
+    function attachVideoMaskSync(card) {
+      const video = card.querySelector('.js-scene-video');
+      if (!video) return;
+      let lastSecond = -1;
+
+      const syncForCurrentTime = async () => {
+        const second = Math.max(0, Math.floor(video.currentTime || 0));
+        if (second === lastSecond) return;
+        lastSecond = second;
+        await ensureFrameData(card.dataset.fileName || '', second);
+        renderMaskOverlay(card, second);
+      };
+
+      video.addEventListener('loadedmetadata', () => {
+        lastSecond = -1;
+        void syncForCurrentTime();
+      });
+      video.addEventListener('timeupdate', () => {
+        void syncForCurrentTime();
+      });
+      video.addEventListener('seeked', () => {
+        void syncForCurrentTime();
+      });
+      video.addEventListener('play', () => {
+        void syncForCurrentTime();
+      });
+
+      void syncForCurrentTime();
+    }
+
+    cards.forEach((card) => attachVideoMaskSync(card));
+
+    async function checkElevenlabsAccess() {
+      if (!accessBtn || !accessResult) return;
+      accessBtn.disabled = true;
+      accessResult.className = 'alert py-2 px-3 alert-secondary';
+      accessResult.textContent = 'Проверяю доступ к ElevenLabs API...';
+      accessResult.classList.remove('d-none');
+      try {
+        const resp = await fetch('/api/templates2/check-access', {
+          headers: { 'Accept': 'application/json' }
+        });
+        const data = await resp.json();
+        if (data && data.ok) {
+          const tierText = data.tier ? ` Тариф: ${data.tier}.` : '';
+          accessResult.className = 'alert py-2 px-3 alert-success';
+          accessResult.textContent = `${data.message || 'Доступ подтверждён.'}${tierText}`;
+        } else {
+          accessResult.className = 'alert py-2 px-3 alert-warning';
+          accessResult.textContent = (data && data.message) ? data.message : 'Доступ не подтверждён.';
+        }
+      } catch (_) {
+        accessResult.className = 'alert py-2 px-3 alert-danger';
+        accessResult.textContent = 'Не удалось проверить доступ ElevenLabs API.';
+      } finally {
+        accessBtn.disabled = false;
+      }
+    }
+
+    if (accessBtn) {
+      accessBtn.addEventListener('click', () => { void checkElevenlabsAccess(); });
+    }
+
+    const socket = io();
+
+    socket.on('connect', () => {
+      socket.emit('watch_template2', { template_name: templateName });
+    });
+
+    socket.on('template2_job_update', (payload) => {
+      if (!payload || payload.template_name !== templateName) return;
+      const card = findCardByFile(payload.file_name);
+      if (!card) return;
+      updateCard(card, payload.job || null);
+    });
+
+    window.addEventListener('beforeunload', () => {
+      try {
+        socket.emit('unwatch_template2', { template_name: templateName });
+      } catch (_) {
+      }
+    });
+
+    // Keep current server-rendered state and only apply realtime deltas via socket.
+    // No HTTP polling on this screen.
+  })();
+</script>
+{% endblock %}

@@ -1,0 +1,585 @@
+{% extends "base.html" %}
+{% block title %}{{ cartoon.title or "Мультик" }} — Cartoon AI{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+  <a href="{{ url_for('cartoons_list') }}" class="text-muted text-decoration-none small">
+    <i class="bi bi-arrow-left me-1"></i>Назад к мультикам
+  </a>
+</div>
+
+{# ── Header ── #}
+<div class="card mb-4">
+  <div class="card-body p-4">
+    <div class="d-flex align-items-start justify-content-between gap-3 flex-wrap">
+      <div class="d-flex align-items-center gap-3">
+        <div class="rounded-3 d-flex align-items-center justify-content-center flex-shrink-0"
+             style="width:56px;height:56px;background:#f3f0ff;">
+          <i class="bi bi-film fs-3" style="color:#7c3aed;"></i>
+        </div>
+        <div>
+          <h3 class="fw-bold mb-1">{{ cartoon.title or "Без названия" }}</h3>
+          <div class="d-flex align-items-center gap-2 flex-wrap">
+            {% if cartoon.status == "ready" %}
+              <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Готово</span>
+              <span class="badge" style="background:#f3f0ff;color:#7c3aed;">
+                <i class="bi bi-collection me-1"></i>{{ cartoon.scenes|length }} сцен
+              </span>
+              <span class="badge" style="background:#f3f0ff;color:#7c3aed;">
+                <i class="bi bi-clock me-1"></i>{{ cartoon.total_duration }} сек
+              </span>
+            {% elif cartoon.status == "generating" %}
+              <span class="badge bg-warning text-dark">
+                <span class="spinner-border spinner-border-sm me-1"></span>Генерация...
+              </span>
+            {% elif cartoon.status == "failed" %}
+              <span class="badge bg-danger"><i class="bi bi-exclamation-circle me-1"></i>Ошибка</span>
+            {% else %}
+              <span class="badge bg-secondary">Черновик</span>
+            {% endif %}
+            <span class="text-muted small">{{ cartoon.created_at.strftime('%d.%m.%Y %H:%M') }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="d-flex gap-2 flex-wrap">
+        <form method="POST" action="{{ url_for('step_storyboard', cartoon_id=cartoon.id) }}">
+          <button type="submit" class="btn btn-primary btn-sm pipeline-step-btn" data-pipeline-action="1">
+            <i class="bi bi-1-circle me-1"></i>{% if pipeline_status.storyboard %}Пересоздать историю{% else %}Шаг 1: История{% endif %}
+          </button>
+        </form>
+        <form method="POST" action="{{ url_for('step_images', cartoon_id=cartoon.id) }}">
+          <button type="submit" class="btn btn-outline-primary btn-sm pipeline-step-btn" data-pipeline-action="1">
+            <i class="bi bi-2-circle me-1"></i>Шаг 2: Кадры
+          </button>
+        </form>
+        <form method="POST" action="{{ url_for('step_audio', cartoon_id=cartoon.id) }}">
+          <button type="submit" class="btn btn-outline-primary btn-sm pipeline-step-btn" data-pipeline-action="1">
+            <i class="bi bi-3-circle me-1"></i>Шаг 3: Аудио
+          </button>
+        </form>
+        <form method="POST" action="{{ url_for('step_video', cartoon_id=cartoon.id) }}"
+              onsubmit="return confirm('Запустить шаг видео? Это потратит кредиты API.')">
+          <button type="submit" class="btn btn-outline-primary btn-sm pipeline-step-btn" data-pipeline-action="1">
+            <i class="bi bi-4-circle me-1"></i>Шаг 4: Видео
+          </button>
+        </form>
+        <form method="POST" action="{{ url_for('step_assemble', cartoon_id=cartoon.id) }}">
+          <button type="submit" class="btn btn-outline-primary btn-sm pipeline-step-btn" data-pipeline-action="1">
+            <i class="bi bi-5-circle me-1"></i>Шаг 5: Сборка
+          </button>
+        </form>
+        <form method="POST" action="{{ url_for('regenerate_cartoon', cartoon_id=cartoon.id) }}">
+          <button type="submit" class="btn btn-outline-secondary btn-sm pipeline-step-btn" data-pipeline-action="1">
+            <i class="bi bi-arrow-clockwise me-1"></i>Перегенерировать историю
+          </button>
+        </form>
+        <form method="POST" action="{{ url_for('delete_cartoon', cartoon_id=cartoon.id) }}"
+              onsubmit="return confirm('Удалить этот мультик?')">
+          <button type="submit" class="btn btn-outline-danger btn-sm pipeline-step-btn" data-pipeline-action="1">
+            <i class="bi bi-trash me-1"></i>Удалить
+          </button>
+        </form>
+      </div>
+    </div>
+
+    {# Story idea — inline editable #}
+    <div class="mt-3 p-3 rounded-3" style="background:#faf5ff;border-left:4px solid #a855f7;">
+      <div class="d-flex align-items-center justify-content-between mb-1">
+        <div class="text-muted small fw-semibold text-uppercase" style="letter-spacing:.05em;">
+          <i class="bi bi-lightbulb me-1"></i>Идея истории
+        </div>
+        <button type="button" class="btn btn-link btn-sm p-0 text-decoration-none"
+                style="color:#7c3aed;" id="editIdeaBtn">
+          <i class="bi bi-pencil me-1"></i>Изменить
+        </button>
+      </div>
+
+      {# View mode #}
+      <p class="mb-0" style="color:#4c1d95;" id="ideaText">{{ cartoon.story_prompt }}</p>
+
+      {# Edit mode (hidden by default) #}
+      <form method="POST" action="{{ url_for('edit_cartoon', cartoon_id=cartoon.id) }}"
+            id="editIdeaForm" style="display:none;">
+        <textarea name="story_prompt" class="form-control mb-2" rows="3"
+                  style="border-color:#a855f7;border-radius:10px;font-size:.95rem;">{{ cartoon.story_prompt }}</textarea>
+        <div class="d-flex gap-2">
+          <button type="submit" class="btn btn-primary btn-sm">
+            <i class="bi bi-check-lg me-1"></i>Сохранить
+          </button>
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="cancelEditBtn">
+            Отмена
+          </button>
+        </div>
+      </form>
+    </div>
+
+    {# Participants & characters #}
+    {% if cartoon.participants or cartoon.character_links %}
+    <div class="mt-3 d-flex gap-4 flex-wrap">
+      {% if cartoon.participants %}
+      <div>
+        <div class="text-muted small fw-semibold mb-2 text-uppercase" style="letter-spacing:.05em;">
+          <i class="bi bi-people me-1"></i>Дети
+        </div>
+        <div class="d-flex gap-2 flex-wrap">
+          {% for p in cartoon.participants %}
+            {% set child = p.child %}
+            <div class="d-flex align-items-center gap-2 rounded-pill px-3 py-1"
+                 style="background:#f3f0ff;font-size:.85rem;">
+              {% if child.selected_avatar and child.selected_avatar.image_url %}
+                <img src="{{ child.selected_avatar.image_url }}"
+                     style="width:24px;height:24px;object-fit:cover;border-radius:50%;">
+              {% else %}
+                <i class="bi bi-person-fill" style="color:#a78bfa;"></i>
+              {% endif %}
+              <span class="fw-semibold" style="color:#4c1d95;">{{ child.name }}</span>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      {% if cartoon.character_links %}
+      <div>
+        <div class="text-muted small fw-semibold mb-2 text-uppercase" style="letter-spacing:.05em;">
+          <i class="bi bi-person-badge me-1"></i>Персонажи
+        </div>
+        <div class="d-flex gap-2 flex-wrap">
+          {% for cl in cartoon.character_links %}
+            {% set char = cl.character %}
+            <div class="d-flex align-items-center gap-2 rounded-pill px-3 py-1"
+                 style="background:#f3f0ff;font-size:.85rem;">
+              {% if char.image_filename %}
+                <img src="{{ url_for('static', filename='uploads/' ~ char.image_filename) }}"
+                     style="width:24px;height:24px;object-fit:cover;border-radius:50%;">
+              {% else %}
+                <i class="bi bi-person-badge" style="color:#a78bfa;"></i>
+              {% endif %}
+              <span class="fw-semibold" style="color:#4c1d95;">{{ char.name }}</span>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <div class="mt-3 d-flex gap-2 flex-wrap">
+      <span class="badge {% if pipeline_status.storyboard %}bg-success{% else %}bg-secondary{% endif %}" id="stepBadgeStory">1. История</span>
+      <span class="badge {% if pipeline_status.images %}bg-success{% else %}bg-secondary{% endif %}" id="stepBadgeImages">2. Кадры</span>
+      <span class="badge {% if pipeline_status.audio %}bg-success{% else %}bg-secondary{% endif %}" id="stepBadgeAudio">3. Аудио</span>
+      <span class="badge {% if pipeline_status.video %}bg-success{% else %}bg-secondary{% endif %}" id="stepBadgeVideo">4. Видео</span>
+      <span class="badge {% if pipeline_status.assemble %}bg-success{% else %}bg-secondary{% endif %}" id="stepBadgeAssemble">5. Сборка</span>
+    </div>
+    <div class="mt-2 small {% if pipeline_runtime.running %}text-warning{% else %}text-muted{% endif %}" id="pipelineRuntimeLabel">
+      {% if pipeline_runtime.running %}
+        Выполняется шаг: {{ pipeline_runtime.step }}. {{ pipeline_runtime.message }}
+      {% elif pipeline_runtime.message %}
+        {{ pipeline_runtime.message }}
+      {% else %}
+        Пайплайн ожидает запуска.
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{# ── Storyboard ── #}
+{% if cartoon.status == "ready" and cartoon.scenes %}
+  <div class="card mb-4 border-success" id="finalVideoCard" {% if not final_video_url %}style="display:none;"{% endif %}>
+    <div class="card-body">
+      <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap mb-2">
+        <h6 class="fw-bold mb-0 text-success">
+          <i class="bi bi-check2-circle me-1"></i>Финальный мультфильм
+        </h6>
+        <span class="badge bg-success">Stitch + Add Audio</span>
+      </div>
+      <div class="rounded-3 overflow-hidden" style="background:#000;">
+        <video controls class="w-100" style="max-height:420px;display:block;" id="finalVideoPlayer" {% if final_video_url %}src="{{ final_video_url }}"{% endif %}>
+          Ваш браузер не поддерживает видео.
+        </video>
+      </div>
+    </div>
+  </div>
+
+  <h5 class="fw-bold mb-3">
+    <i class="bi bi-collection-play me-2" style="color:#7c3aed;"></i>Раскадровка
+  </h5>
+
+  <div class="position-relative">
+    {# Vertical timeline line #}
+    <div class="position-absolute"
+         style="left:28px;top:0;bottom:0;width:2px;background:linear-gradient(180deg,#7c3aed,#a855f7);opacity:.2;z-index:0;">
+    </div>
+
+    <div class="d-flex flex-column gap-3">
+      {% for scene in cartoon.scenes %}
+      <div class="d-flex gap-3 align-items-start position-relative">
+        {# Scene number bubble #}
+        <div class="flex-shrink-0 rounded-circle d-flex align-items-center justify-content-center fw-bold text-white z-1"
+             style="width:56px;height:56px;background:linear-gradient(135deg,#7c3aed,#a855f7);font-size:1.1rem;box-shadow:0 2px 8px rgba(124,58,237,.35);">
+          {{ scene.scene_number }}
+        </div>
+
+        {# Scene card #}
+        <div class="card flex-grow-1" id="scene-card-{{ scene.id }}">
+          <div class="card-body p-4">
+
+            {# Title + duration + video status #}
+            <div class="d-flex align-items-start justify-content-between gap-2 mb-2 flex-wrap">
+              <h6 class="fw-bold mb-0" style="color:#1e1b4b;">{{ scene.title }}</h6>
+              <div class="d-flex gap-2 align-items-center flex-wrap">
+                <span class="badge rounded-pill" style="background:#f3f0ff;color:#7c3aed;font-size:.8rem;">
+                  <i class="bi bi-clock me-1"></i>{{ scene.duration_seconds }} сек
+                </span>
+                {# Video status badge #}
+                {% if scene.video_status == "completed" %}
+                  <span class="badge bg-success"><i class="bi bi-camera-video me-1"></i>Видео готово</span>
+                {% elif scene.video_status == "pending" %}
+                  <span class="badge bg-warning text-dark scene-video-pending" data-scene-id="{{ scene.id }}">
+                    <span class="spinner-border spinner-border-sm me-1"></span>Рендер…
+                  </span>
+                {% elif scene.video_status == "failed" %}
+                  <span class="badge bg-danger"><i class="bi bi-exclamation-circle me-1"></i>Ошибка видео</span>
+                {% endif %}
+              </div>
+            </div>
+
+            {# Video player (when ready) #}
+            {% if scene.video_status == "completed" and scene.video_url %}
+            <div class="mb-3 rounded-3 overflow-hidden" style="background:#000;">
+              <video controls class="w-100" style="max-height:320px;display:block;"
+                     src="{{ scene.video_url }}">
+                Ваш браузер не поддерживает видео.
+              </video>
+            </div>
+            {% endif %}
+
+            {# Start image for scene #}
+            {% if scene_start_images.get(scene.id) %}
+            <div class="mb-3 rounded-3 overflow-hidden border p-2" id="scene-start-image-wrap-{{ scene.id }}" style="background:#f8fafc;">
+              <img src="{{ scene_start_images.get(scene.id) }}" class="w-100"
+                   id="scene-start-image-{{ scene.id }}"
+                   style="display:block;max-height:180px;object-fit:contain;"
+                   alt="Start frame scene {{ scene.scene_number }}">
+            </div>
+            {% else %}
+            <div class="mb-3 rounded-3 overflow-hidden border p-2" id="scene-start-image-wrap-{{ scene.id }}" style="display:none;background:#f8fafc;">
+              <img src="" class="w-100"
+                   id="scene-start-image-{{ scene.id }}"
+                   style="display:block;max-height:180px;object-fit:contain;"
+                   alt="Start frame scene {{ scene.scene_number }}">
+            </div>
+            {% endif %}
+
+            <div class="mb-3" id="scene-audio-wrap-{{ scene.id }}">
+              <div class="small fw-semibold mb-2" style="color:#6b7280;">
+                <i class="bi bi-soundwave me-1"></i>Аудио сцены
+              </div>
+              <div class="d-flex flex-column gap-2">
+                <div id="scene-voice-audio-wrap-{{ scene.id }}" {% if not scene_voice_audio.get(scene.id) %}style="display:none;"{% endif %}>
+                  <div class="small text-muted mb-1">Voice</div>
+                  <audio controls class="w-100" id="scene-voice-audio-{{ scene.id }}" {% if scene_voice_audio.get(scene.id) %}src="{{ scene_voice_audio.get(scene.id) }}"{% endif %}></audio>
+                </div>
+                <div id="scene-sfx-audio-wrap-{{ scene.id }}" {% if not scene_sfx_audio.get(scene.id) %}style="display:none;"{% endif %}>
+                  <div class="small text-muted mb-1">SFX</div>
+                  <audio controls class="w-100" id="scene-sfx-audio-{{ scene.id }}" {% if scene_sfx_audio.get(scene.id) %}src="{{ scene_sfx_audio.get(scene.id) }}"{% endif %}></audio>
+                </div>
+                <div id="scene-mix-audio-wrap-{{ scene.id }}" {% if not scene_mix_audio.get(scene.id) %}style="display:none;"{% endif %}>
+                  <div class="small text-muted mb-1">Mix</div>
+                  <audio controls class="w-100" id="scene-mix-audio-{{ scene.id }}" {% if scene_mix_audio.get(scene.id) %}src="{{ scene_mix_audio.get(scene.id) }}"{% endif %}></audio>
+                </div>
+              </div>
+            </div>
+
+            <p class="mb-2" style="color:#374151;line-height:1.6;">{{ scene.description }}</p>
+
+            {# Weather + Music + Sound in a row #}
+            <div class="d-flex gap-2 flex-wrap mb-3">
+              {% if scene.weather %}
+              <span class="badge rounded-pill px-3 py-2" style="background:#e0f2fe;color:#0369a1;font-size:.8rem;font-weight:500;">
+                <i class="bi bi-cloud-sun me-1"></i>{{ scene.weather }}
+              </span>
+              {% endif %}
+              {% if scene.music %}
+              <span class="badge rounded-pill px-3 py-2" style="background:#fef9c3;color:#854d0e;font-size:.8rem;font-weight:500;">
+                <i class="bi bi-music-note-beamed me-1"></i>{{ scene.music }}
+              </span>
+              {% endif %}
+              {% if scene.sound_effects %}
+              <span class="badge rounded-pill px-3 py-2" style="background:#f0fdf4;color:#166534;font-size:.8rem;font-weight:500;">
+                <i class="bi bi-soundwave me-1"></i>{{ scene.sound_effects }}
+              </span>
+              {% endif %}
+            </div>
+
+            {# Dialogue #}
+            {% if scene.dialogue %}
+            <div class="mb-3 p-3 rounded-3" style="background:#fdf4ff;border-left:3px solid #d946ef;">
+              <div class="small fw-semibold mb-2" style="color:#86198f;">
+                <i class="bi bi-chat-quote me-1"></i>Реплики
+              </div>
+              <p class="mb-0 small" style="color:#374151;white-space:pre-line;line-height:1.7;">{{ scene.dialogue }}</p>
+            </div>
+            {% endif %}
+
+            {# Facial expressions #}
+            {% if scene.facial_expressions %}
+            <div class="mb-3 p-3 rounded-3" style="background:#fff7ed;border-left:3px solid #f97316;">
+              <div class="small fw-semibold mb-2" style="color:#c2410c;">
+                <i class="bi bi-emoji-smile me-1"></i>Мимика
+              </div>
+              <p class="mb-0 small" style="color:#374151;white-space:pre-line;line-height:1.7;">{{ scene.facial_expressions }}</p>
+            </div>
+            {% endif %}
+
+            {# Visual description #}
+            {% if scene.visual_description %}
+            <div class="mb-3 p-3 rounded-3" style="background:#fafafa;border:1px solid #f0e6ff;">
+              <div class="text-muted small fw-semibold mb-1">
+                <i class="bi bi-eye me-1" style="color:#a855f7;"></i>Визуальное описание
+              </div>
+              <p class="mb-0 fst-italic small" style="color:#6b7280;">{{ scene.visual_description }}</p>
+            </div>
+            {% endif %}
+
+            {# Video prompt (collapsible) #}
+            {% if scene.video_prompt %}
+            <div>
+              <button class="btn btn-link btn-sm p-0 text-decoration-none"
+                      style="color:#6b7280;font-size:.8rem;"
+                      data-bs-toggle="collapse"
+                      data-bs-target="#vp-{{ scene.id }}">
+                <i class="bi bi-code-slash me-1"></i>Video prompt для API
+              </button>
+              <div class="collapse mt-2" id="vp-{{ scene.id }}">
+                <div class="p-3 rounded-3" style="background:#f8f8f8;border:1px dashed #d1d5db;">
+                  <p class="mb-0 small font-monospace" style="color:#374151;white-space:pre-wrap;line-height:1.6;">{{ scene.video_prompt }}</p>
+                </div>
+              </div>
+            </div>
+            {% endif %}
+
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+{% elif cartoon.status == "generating" %}
+  <div class="card text-center py-5">
+    <div class="card-body">
+      <div class="spinner-border mb-3" style="width:3rem;height:3rem;color:#7c3aed;"></div>
+      <h5 class="text-muted">Придумываем историю…</h5>
+      <p class="text-muted small">Обновите страницу через несколько секунд</p>
+    </div>
+  </div>
+
+{% elif cartoon.status == "failed" %}
+  <div class="card text-center py-5 border-danger">
+    <div class="card-body">
+      <i class="bi bi-exclamation-triangle display-4 text-danger mb-3 d-block"></i>
+      <h5 class="text-danger">Не удалось сгенерировать историю</h5>
+      <p class="text-muted">Проверьте OPENAI_API_KEY в .env и попробуйте перегенерировать.</p>
+      <form method="POST" action="{{ url_for('regenerate_cartoon', cartoon_id=cartoon.id) }}" class="d-inline">
+        <button type="submit" class="btn btn-primary mt-2">
+          <i class="bi bi-arrow-clockwise me-1"></i>Попробовать снова
+        </button>
+      </form>
+    </div>
+  </div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // ── Inline idea edit ──────────────────────────────────────────────────────
+  const editBtn   = document.getElementById('editIdeaBtn');
+  const cancelBtn = document.getElementById('cancelEditBtn');
+  const ideaText  = document.getElementById('ideaText');
+  const editForm  = document.getElementById('editIdeaForm');
+
+  if (editBtn) {
+    editBtn.addEventListener('click', function () {
+      ideaText.style.display = 'none';
+      editBtn.style.display  = 'none';
+      editForm.style.display = '';
+      editForm.querySelector('textarea').focus();
+    });
+    cancelBtn.addEventListener('click', function () {
+      editForm.style.display = 'none';
+      ideaText.style.display = '';
+      editBtn.style.display  = '';
+    });
+  }
+  const pipelineButtons = Array.from(document.querySelectorAll('.pipeline-step-btn'));
+  const pipelineLabel = document.getElementById('pipelineRuntimeLabel');
+
+  function setPipelineButtonsDisabled(disabled) {
+    pipelineButtons.forEach((btn) => { btn.disabled = !!disabled; });
+  }
+
+  function setPipelineLabel(status, message, step) {
+    if (!pipelineLabel) return;
+    if (status === "running") {
+      pipelineLabel.className = "mt-2 small text-warning";
+      pipelineLabel.textContent = `Выполняется шаг: ${step || "unknown"}. ${message || ""}`.trim();
+    } else if (status === "success") {
+      pipelineLabel.className = "mt-2 small text-success";
+      pipelineLabel.textContent = message || "Шаг завершён успешно.";
+    } else if (status === "error") {
+      pipelineLabel.className = "mt-2 small text-danger";
+      pipelineLabel.textContent = message || "Шаг завершился с ошибкой.";
+    } else {
+      pipelineLabel.className = "mt-2 small text-muted";
+      pipelineLabel.textContent = message || "Пайплайн ожидает запуска.";
+    }
+  }
+
+  function setStepBadge(id, done) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.remove("bg-success", "bg-secondary");
+    el.classList.add(done ? "bg-success" : "bg-secondary");
+  }
+
+  function applySceneStartImage(scene) {
+    if (!scene || !scene.id) return;
+    const imageUrl = scene.start_image_url;
+    if (!imageUrl) return;
+    const wrap = document.getElementById(`scene-start-image-wrap-${scene.id}`);
+    const img = document.getElementById(`scene-start-image-${scene.id}`);
+    if (!wrap || !img) return;
+    if (img.getAttribute("src") !== imageUrl) {
+      img.setAttribute("src", imageUrl);
+    }
+    wrap.style.display = "";
+  }
+
+  function applySceneAudio(scene) {
+    if (!scene || !scene.id) return;
+    const mapping = [
+      { key: "voice_audio_url", wrap: `scene-voice-audio-wrap-${scene.id}`, audio: `scene-voice-audio-${scene.id}` },
+      { key: "sfx_audio_url", wrap: `scene-sfx-audio-wrap-${scene.id}`, audio: `scene-sfx-audio-${scene.id}` },
+      { key: "mix_audio_url", wrap: `scene-mix-audio-wrap-${scene.id}`, audio: `scene-mix-audio-${scene.id}` },
+    ];
+    mapping.forEach((m) => {
+      const url = scene[m.key];
+      const wrap = document.getElementById(m.wrap);
+      const audio = document.getElementById(m.audio);
+      if (!wrap || !audio || !url) return;
+      if (audio.getAttribute("src") !== url) {
+        audio.setAttribute("src", url);
+      }
+      wrap.style.display = "";
+    });
+  }
+
+  function applyPipelineSnapshot(payload) {
+    const status = payload?.pipeline_status || {};
+    setStepBadge("stepBadgeStory", !!status.storyboard);
+    setStepBadge("stepBadgeImages", !!status.images);
+    setStepBadge("stepBadgeAudio", !!status.audio);
+    setStepBadge("stepBadgeVideo", !!status.video);
+    setStepBadge("stepBadgeAssemble", !!status.assemble);
+
+    if (Array.isArray(payload?.scenes)) {
+      payload.scenes.forEach((scene) => {
+        applySceneStartImage(scene);
+        applySceneAudio(scene);
+        applySceneUpdate(scene);
+      });
+    }
+
+    const finalCard = document.getElementById("finalVideoCard");
+    const finalPlayer = document.getElementById("finalVideoPlayer");
+    if (payload?.final_video_url && finalCard && finalPlayer) {
+      finalCard.style.display = "";
+      if (finalPlayer.getAttribute("src") !== payload.final_video_url) {
+        finalPlayer.setAttribute("src", payload.final_video_url);
+      }
+    }
+  }
+
+  pipelineButtons.forEach((btn) => {
+    btn.closest('form')?.addEventListener('submit', () => {
+      setPipelineButtonsDisabled(true);
+      setPipelineLabel("running", "Запуск шага...", "pending");
+    });
+  });
+</script>
+
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+  const CARTOON_ID = {{ cartoon.id }};
+  const INITIAL_PIPELINE_RUNNING = {{ "true" if pipeline_runtime.running else "false" }};
+  const socket = io();
+
+  socket.on("connect", () => {
+    socket.emit("watch_cartoon", { cartoon_id: CARTOON_ID });
+  });
+
+  socket.on("video_scene_ready", (scene) => {
+    applySceneUpdate(scene);
+  });
+
+  function applySceneUpdate(scene) {
+    const badge = document.querySelector(`.scene-video-pending[data-scene-id="${scene.id}"]`);
+
+    if (scene.video_status === "completed" && scene.video_url) {
+      // Replace spinner badge with "Видео готово"
+      if (badge) {
+        badge.outerHTML = `<span class="badge bg-success"><i class="bi bi-camera-video me-1"></i>Видео готово</span>`;
+      }
+      // Insert video player at top of card body (after the title row)
+      const card = document.getElementById(`scene-card-${scene.id}`);
+      if (card) {
+        const existingVideo = card.querySelector('video');
+        if (existingVideo) {
+          if (scene.video_url && existingVideo.getAttribute("src") !== scene.video_url) {
+            existingVideo.setAttribute("src", scene.video_url);
+          }
+        } else {
+          const titleRow = card.querySelector('.card-body > .d-flex');
+          if (titleRow) {
+          const player = document.createElement('div');
+          player.className = 'mb-3 rounded-3 overflow-hidden';
+          player.style.background = '#000';
+          player.innerHTML = `<video controls class="w-100" style="max-height:320px;display:block;" src="${scene.video_url}">Ваш браузер не поддерживает видео.</video>`;
+          titleRow.insertAdjacentElement('afterend', player);
+          }
+        }
+      }
+    } else if (scene.video_status === "failed") {
+      if (badge) {
+        badge.outerHTML = `<span class="badge bg-danger"><i class="bi bi-exclamation-circle me-1"></i>Ошибка видео</span>`;
+      }
+    }
+
+    // Keep socket connection alive for pipeline updates even when video pending badges are gone.
+  }
+
+  socket.on("pipeline_status", (payload) => {
+    if (!payload || payload.cartoon_id !== CARTOON_ID) return;
+    const running = !!payload.running;
+    setPipelineButtonsDisabled(running);
+    setPipelineLabel(payload.status, payload.message, payload.step);
+    applyPipelineSnapshot(payload);
+  });
+
+  // Recovery: keep a lightweight video sync only when socket is temporarily disconnected.
+  function syncVideoIfNeeded() {
+    if (socket.connected) return;
+    if (!document.querySelector('.scene-video-pending')) return;
+    fetch(`/api/cartoons/${CARTOON_ID}/video-sync`).catch(() => {});
+  }
+
+  if (INITIAL_PIPELINE_RUNNING) {
+    setPipelineButtonsDisabled(true);
+    setPipelineLabel("running", "{{ pipeline_runtime.message or 'Выполняется шаг...' }}", "{{ pipeline_runtime.step or 'unknown' }}");
+  }
+
+  const syncInterval = setInterval(syncVideoIfNeeded, 15_000);
+</script>
+{% endblock %}

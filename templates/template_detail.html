@@ -1,0 +1,440 @@
+{% extends "base.html" %}
+{% block title %}Шаблон {{ template_name }} — Cartoon AI{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+  <a href="{{ url_for('templates_list') }}" class="text-muted text-decoration-none small">
+    <i class="bi bi-arrow-left me-1"></i>Назад к шаблонам
+  </a>
+</div>
+
+<div class="d-flex align-items-center justify-content-between mb-3 gap-2 flex-wrap">
+  <h2 class="fw-bold mb-0">
+    <i class="bi bi-folder2-open me-2"></i>{{ template_name }}
+  </h2>
+  <div class="d-flex align-items-center gap-2">
+    <span class="badge" style="background:#f3f0ff;color:#7c3aed;">
+      {{ fragments|length }} фрагментов
+    </span>
+  </div>
+</div>
+
+{% if fragments %}
+  <div class="d-flex flex-column gap-3">
+    {% for fragment in fragments %}
+      <div class="card" id="fragment-{{ loop.index }}" data-file-name="{{ fragment.name }}">
+        <div class="card-body">
+          <div class="d-flex align-items-center justify-content-between mb-2">
+            <div class="fw-semibold">
+              <span class="badge me-2" style="background:#7c3aed;color:#fff;">{{ loop.index }}</span>
+              {{ fragment.name }}
+            </div>
+            <a href="{{ fragment.url }}" target="_blank" class="small text-decoration-none">Открыть файл</a>
+          </div>
+
+          {% if fragment.media_type == "video" %}
+            <div class="rounded overflow-hidden position-relative" style="background:#000;">
+              <video controls preload="metadata" class="w-100 js-scene-video" style="max-height:360px;" poster="">
+                <source src="{{ fragment.url }}">
+                Ваш браузер не поддерживает видео.
+              </video>
+              <div class="position-absolute top-0 start-0 w-100 h-100 pe-none js-mask-overlay"></div>
+            </div>
+            <div class="mt-2 small text-muted js-mask-meta">
+              {% if fragment.detected_masks %}
+                Ключевой кадр: {{ fragment.detected_keyframe_id or "?" }}.
+              {% else %}
+                Маски ещё не определены для этого фрагмента.
+              {% endif %}
+              Для явного выбора маски добавьте в промпт токен вида <code>{mask:MASK_ID}</code>.
+            </div>
+            <div class="mt-1 small js-mask-badges"></div>
+            <form method="POST"
+                  action="{{ url_for('save_template_fragment_prompt', template_name=template_name) }}"
+                  class="mt-3">
+              <input type="hidden" name="file_name" value="{{ fragment.name }}">
+              {% set job = fragment.job or {} %}
+              {% set mask_detect_busy = (job.status in ["queued", "processing"]) and (job.operation == "detect_masks") %}
+              <label class="form-label fw-semibold mb-1">Промпт для сцены</label>
+              <div class="form-check mb-2">
+                <input
+                  class="form-check-input js-aggressive-toggle"
+                  type="checkbox"
+                  id="aggressive-{{ loop.index }}"
+                  name="aggressive_mask_search"
+                  value="1"
+                  {% if mask_detect_busy %}disabled{% endif %}
+                >
+                <label class="form-check-label small text-muted" for="aggressive-{{ loop.index }}">
+                  Агрессивный поиск персонажа (больше кадров, медленнее)
+                </label>
+              </div>
+              <textarea name="prompt"
+                        class="form-control"
+                        rows="3"
+                        placeholder="Опишите, что нужно сделать с этой сценой..."
+                        {% if mask_detect_busy %}disabled{% endif %}>{{ fragment.prompt }}</textarea>
+              <div class="d-flex justify-content-end mt-2 gap-2">
+                <button type="submit"
+                        formaction="{{ url_for('detect_template_masks', template_name=template_name) }}"
+                        class="btn btn-outline-primary btn-sm"
+                        {% if mask_detect_busy %}disabled{% endif %}>
+                  <i class="bi bi-bounding-box-circles me-1"></i>Определить маски
+                </button>
+                <button type="submit" class="btn btn-primary btn-sm" {% if mask_detect_busy %}disabled{% endif %}>
+                  <i class="bi bi-save me-1"></i>Сохранить промпт
+                </button>
+                <button type="submit"
+                        formaction="{{ url_for('apply_template_fragment_prompt', template_name=template_name) }}"
+                        name="apply_mode"
+                        value="modify"
+                        class="btn btn-success btn-sm"
+                        {% if mask_detect_busy %}disabled{% endif %}>
+                  <i class="bi bi-magic me-1"></i>Modify
+                </button>
+                <button type="submit"
+                        formaction="{{ url_for('apply_template_fragment_prompt', template_name=template_name) }}"
+                        name="apply_mode"
+                        value="swap"
+                        class="btn btn-warning btn-sm"
+                        {% if mask_detect_busy %}disabled{% endif %}>
+                  <i class="bi bi-shuffle me-1"></i>Swap
+                </button>
+              </div>
+            </form>
+
+            <div class="mt-2 small js-job-status" {% if not job %}style="display:none;"{% endif %}>
+              <span class="js-job-badge">
+                {% if job.status == "queued" %}
+                  <span class="badge bg-secondary">В очереди</span>
+                {% elif job.status == "processing" %}
+                  <span class="badge bg-warning text-dark">Обрабатывается</span>
+                {% elif job.status == "completed" %}
+                  <span class="badge bg-success">Готово</span>
+                {% elif job.status == "failed" %}
+                  <span class="badge bg-danger">Ошибка</span>
+                {% else %}
+                  <span class="badge bg-secondary">{{ job.status }}</span>
+                {% endif %}
+              </span>
+              <span class="text-muted ms-2 js-job-updated">
+                {% if job.updated_at %}
+                  Обновлено: {{ job.updated_at }}
+                {% endif %}
+              </span>
+              <div class="text-muted mt-1 js-job-message">
+                {% if job.message %}
+                  {{ job.message }}
+                {% endif %}
+              </div>
+            </div>
+
+            <div class="mt-3 js-job-result" {% if not (job and job.output_url) %}style="display:none;"{% endif %}>
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                  <span class="fw-semibold text-success">
+                    <i class="bi bi-check2-circle me-1"></i>Результат
+                  </span>
+                  <a href="{{ job.output_url if job and job.output_url else '#' }}" target="_blank" class="small text-decoration-none js-job-result-link">Открыть результат</a>
+                </div>
+                <div class="rounded overflow-hidden" style="background:#000;">
+                  <video controls preload="metadata" class="w-100 js-job-result-video" style="max-height:360px;">
+                    <source src="{{ job.output_url if job and job.output_url else '' }}">
+                    Ваш браузер не поддерживает видео.
+                  </video>
+                </div>
+            </div>
+          {% elif fragment.media_type == "audio" %}
+            <audio controls class="w-100">
+              <source src="{{ fragment.url }}">
+              Ваш браузер не поддерживает аудио.
+            </audio>
+          {% elif fragment.media_type == "image" %}
+            <img src="{{ fragment.url }}" alt="{{ fragment.name }}" class="img-fluid rounded border">
+          {% else %}
+            <div class="text-muted small">
+              Предпросмотр для этого типа файла не поддерживается.
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="card text-center py-4">
+    <div class="card-body text-muted">
+      В этом шаблоне пока нет файлов.
+    </div>
+  </div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+  (() => {
+    const templateName = {{ template_name|tojson }};
+    const maskTimelineByFile = {{ mask_timeline_by_file|tojson }};
+    const inFlightMaskRequests = new Map();
+    const cards = Array.from(document.querySelectorAll('[data-file-name]'));
+    if (!cards.length) return;
+
+    function statusBadgeHtml(status) {
+      if (status === 'queued') return '<span class="badge bg-secondary">В очереди</span>';
+      if (status === 'processing') return '<span class="badge bg-warning text-dark">Обрабатывается</span>';
+      if (status === 'completed') return '<span class="badge bg-success">Готово</span>';
+      if (status === 'failed') return '<span class="badge bg-danger">Ошибка</span>';
+      if (!status) return '';
+      return `<span class="badge bg-secondary">${status}</span>`;
+    }
+
+    function updateCard(card, job) {
+      const statusWrap = card.querySelector('.js-job-status');
+      const badgeEl = card.querySelector('.js-job-badge');
+      const updatedEl = card.querySelector('.js-job-updated');
+      const msgEl = card.querySelector('.js-job-message');
+      const resultWrap = card.querySelector('.js-job-result');
+      const resultLink = card.querySelector('.js-job-result-link');
+      const resultVideo = card.querySelector('.js-job-result-video');
+
+      if (!statusWrap || !badgeEl || !updatedEl || !msgEl || !resultWrap || !resultLink || !resultVideo) {
+        return;
+      }
+
+      if (!job) {
+        statusWrap.style.display = 'none';
+        resultWrap.style.display = 'none';
+        const controls = card.querySelectorAll('form textarea, form button');
+        controls.forEach((el) => {
+          el.disabled = false;
+        });
+        return;
+      }
+
+      statusWrap.style.display = '';
+      badgeEl.innerHTML = statusBadgeHtml(job.status || '');
+      updatedEl.textContent = job.updated_at ? `Обновлено: ${job.updated_at}` : '';
+      msgEl.textContent = job.message || '';
+      const controls = card.querySelectorAll('form textarea, form button');
+      const isMaskDetectBusy = (
+        (job.operation === 'detect_masks') &&
+        (job.status === 'queued' || job.status === 'processing')
+      );
+      controls.forEach((el) => {
+        el.disabled = !!isMaskDetectBusy;
+      });
+
+      if (job.output_url) {
+        resultWrap.style.display = '';
+        resultLink.href = job.output_url;
+        const source = resultVideo.querySelector('source');
+        if (source && source.getAttribute('src') !== job.output_url) {
+          source.setAttribute('src', job.output_url);
+          resultVideo.load();
+        }
+      } else {
+        resultWrap.style.display = 'none';
+      }
+    }
+
+    function findCardByFile(fileName) {
+      if (!fileName) return null;
+      return document.querySelector(`[data-file-name="${CSS.escape(fileName)}"]`);
+    }
+
+    function getFrameData(fileName, second) {
+      const timeline = maskTimelineByFile[fileName];
+      if (!timeline) return null;
+      return timeline[String(second)] || null;
+    }
+
+    async function ensureFrameData(fileName, second) {
+      const card = findCardByFile(fileName);
+      const aggressiveEl = card ? card.querySelector('.js-aggressive-toggle') : null;
+      const aggressive = aggressiveEl ? !!aggressiveEl.checked : false;
+      const existing = getFrameData(fileName, second);
+      if (existing) {
+        if (!aggressive) return existing;
+        const hasCharacterLike = Array.isArray(existing.masks) && existing.masks.some((m) => {
+          const n = String(m?.mask_name || '').toLowerCase();
+          return /person|human|child|girl|boy|woman|man|face|head|hair|body|character|dress|shirt|jacket|coat|skirt|pants|sheep|bird|cat|dog|rabbit|bunny|fox|wolf/.test(n);
+        });
+        if (hasCharacterLike) return existing;
+      }
+      const reqKey = `${fileName}:${second}:${aggressive ? 1 : 0}`;
+      if (inFlightMaskRequests.has(reqKey)) {
+        return inFlightMaskRequests.get(reqKey);
+      }
+      const p = fetch(
+        `/api/templates/${encodeURIComponent(templateName)}/mask-second?file_name=${encodeURIComponent(fileName)}&second=${encodeURIComponent(second)}&aggressive=${aggressive ? 1 : 0}`,
+        { headers: { 'Accept': 'application/json' } }
+      )
+        .then((r) => r.json())
+        .then((data) => {
+          if (!data || !data.ok || !data.frame) return null;
+          if (!maskTimelineByFile[fileName]) maskTimelineByFile[fileName] = {};
+          maskTimelineByFile[fileName][String(second)] = data.frame;
+          return data.frame;
+        })
+        .catch(() => null)
+        .finally(() => {
+          inFlightMaskRequests.delete(reqKey);
+        });
+      inFlightMaskRequests.set(reqKey, p);
+      return p;
+    }
+
+    function renderMaskOverlay(card, second) {
+      const fileName = card.dataset.fileName || '';
+      const frame = getFrameData(fileName, second);
+      const video = card.querySelector('.js-scene-video');
+      const overlay = card.querySelector('.js-mask-overlay');
+      const meta = card.querySelector('.js-mask-meta');
+      const badges = card.querySelector('.js-mask-badges');
+      if (!overlay || !meta || !badges || !video) return;
+
+      overlay.innerHTML = '';
+      badges.innerHTML = '';
+
+      function getVideoContentRect(videoEl) {
+        const cw = Number(videoEl.clientWidth || 0);
+        const ch = Number(videoEl.clientHeight || 0);
+        const vw = Number(videoEl.videoWidth || 0);
+        const vh = Number(videoEl.videoHeight || 0);
+        if (cw <= 0 || ch <= 0 || vw <= 0 || vh <= 0) {
+          return { x: 0, y: 0, w: Math.max(cw, 1), h: Math.max(ch, 1) };
+        }
+        const containerAspect = cw / ch;
+        const videoAspect = vw / vh;
+        if (containerAspect > videoAspect) {
+          const h = ch;
+          const w = h * videoAspect;
+          return { x: (cw - w) / 2, y: 0, w, h };
+        }
+        const w = cw;
+        const h = w / videoAspect;
+        return { x: 0, y: (ch - h) / 2, w, h };
+      }
+      const rect = getVideoContentRect(video);
+      const contentLayer = document.createElement('div');
+      contentLayer.style.position = 'absolute';
+      contentLayer.style.left = `${rect.x}px`;
+      contentLayer.style.top = `${rect.y}px`;
+      contentLayer.style.width = `${rect.w}px`;
+      contentLayer.style.height = `${rect.h}px`;
+      overlay.appendChild(contentLayer);
+
+      if (!frame || !Array.isArray(frame.masks) || !frame.masks.length) {
+        const attempts = Array.isArray(frame?.mask_attempts) ? frame.mask_attempts.length : 0;
+        meta.innerHTML = `Секунда ${second}: маски не найдены.${attempts ? ` Проверено кадров: ${attempts}.` : ''} Для явного выбора маски используйте <code>{mask:MASK_ID}</code>.`;
+        return;
+      }
+
+      const attempts = Array.isArray(frame.mask_attempts) ? frame.mask_attempts : [];
+      const probeSecond = (typeof frame.probe_second === 'number') ? frame.probe_second : second;
+      const attemptsText = attempts.length ? ` Проверено вариантов: ${attempts.length}.` : '';
+      meta.innerHTML = `Секунда ${second}, выбранный кадр t=${probeSecond}s (keyframe ${frame.keyframe_id || "?"}).${attemptsText} Для явного выбора маски используйте <code>{mask:MASK_ID}</code>.`;
+      frame.masks.forEach((m) => {
+        const badge = document.createElement('span');
+        badge.className = 'badge text-bg-light border me-1 mb-1';
+        badge.textContent = `${m.mask_name || 'mask'}: ${m.mask_id || ''}`;
+        badges.appendChild(badge);
+
+        if (!m.bbox) return;
+        const box = document.createElement('div');
+        box.style.position = 'absolute';
+        box.style.left = `${(Number(m.bbox.x || 0) * 100).toFixed(2)}%`;
+        box.style.top = `${(Number(m.bbox.y || 0) * 100).toFixed(2)}%`;
+        box.style.width = `${(Number(m.bbox.w || 0) * 100).toFixed(2)}%`;
+        box.style.height = `${(Number(m.bbox.h || 0) * 100).toFixed(2)}%`;
+        box.style.border = '2px solid rgba(255,255,0,.95)';
+        box.style.boxShadow = '0 0 0 1px rgba(0,0,0,.35) inset';
+        box.style.background = 'rgba(255,255,0,.08)';
+
+        const label = document.createElement('div');
+        label.style.position = 'absolute';
+        label.style.left = '0';
+        label.style.top = '0';
+        label.style.transform = 'translateY(-100%)';
+        label.style.background = 'rgba(0,0,0,.78)';
+        label.style.color = '#fff';
+        label.style.padding = '2px 6px';
+        label.style.fontSize = '11px';
+        label.style.lineHeight = '1.2';
+        label.style.whiteSpace = 'nowrap';
+        label.textContent = `${m.mask_name || 'mask'} (${m.mask_id || ''})`;
+        box.appendChild(label);
+        contentLayer.appendChild(box);
+      });
+
+      if (attempts.length) {
+        const details = document.createElement('div');
+        details.className = 'small text-muted mt-1';
+        details.textContent = attempts
+          .slice(0, 5)
+          .map((a) => `t=${a.probe_second}s kf=${a.keyframe_id} score=${a.score}: [${(a.mask_names || []).join(', ')}]`)
+          .join(' | ');
+        badges.appendChild(details);
+      }
+    }
+
+    function attachVideoMaskSync(card) {
+      const video = card.querySelector('.js-scene-video');
+      if (!video) return;
+      let lastSecond = -1;
+
+      const syncForCurrentTime = async () => {
+        const second = Math.max(0, Math.floor(video.currentTime || 0));
+        if (second === lastSecond) return;
+        lastSecond = second;
+        await ensureFrameData(card.dataset.fileName || '', second);
+        renderMaskOverlay(card, second);
+      };
+
+      video.addEventListener('loadedmetadata', () => {
+        lastSecond = -1;
+        void syncForCurrentTime();
+      });
+      video.addEventListener('timeupdate', () => {
+        void syncForCurrentTime();
+      });
+      video.addEventListener('seeked', () => {
+        void syncForCurrentTime();
+      });
+      video.addEventListener('play', () => {
+        void syncForCurrentTime();
+      });
+      window.addEventListener('resize', () => {
+        const sec = lastSecond >= 0 ? lastSecond : Math.max(0, Math.floor(video.currentTime || 0));
+        renderMaskOverlay(card, sec);
+      });
+
+      void syncForCurrentTime();
+    }
+
+    cards.forEach((card) => attachVideoMaskSync(card));
+
+    const socket = io();
+
+    socket.on('connect', () => {
+      socket.emit('watch_template', { template_name: templateName });
+    });
+
+    socket.on('template_job_update', (payload) => {
+      if (!payload || payload.template_name !== templateName) return;
+      const card = findCardByFile(payload.file_name);
+      if (!card) return;
+      updateCard(card, payload.job || null);
+    });
+
+    window.addEventListener('beforeunload', () => {
+      try {
+        socket.emit('unwatch_template', { template_name: templateName });
+      } catch (_) {
+      }
+    });
+
+    // Keep current server-rendered state and only apply realtime deltas via socket.
+    // No HTTP polling on this screen.
+  })();
+</script>
+{% endblock %}

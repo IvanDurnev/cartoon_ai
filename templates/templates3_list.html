@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Шаблоны 3 — Cartoon AI{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-4">
+  <h2 class="fw-bold mb-0">
+    <i class="bi bi-collection-play me-2"></i>Шаблоны 3
+  </h2>
+</div>
+
+{% if template_dirs %}
+  <div class="row g-3">
+    {% for item in template_dirs %}
+    <div class="col-12 col-md-6 col-lg-4">
+      <a href="{{ url_for('template3_detail', template_name=item.name) }}" class="text-decoration-none">
+        <div class="card h-100 avatar-card p-3">
+          <div class="d-flex align-items-start gap-3">
+            <div class="rounded-3 d-flex align-items-center justify-content-center flex-shrink-0"
+                 style="width:56px;height:56px;background:#f3f0ff;">
+              <i class="bi bi-folder2-open fs-4" style="color:#7c3aed;"></i>
+            </div>
+            <div class="flex-grow-1">
+              <h6 class="fw-semibold text-dark mb-2">{{ item.name }}</h6>
+              <span class="badge" style="background:#f3f0ff;color:#7c3aed;">
+                <i class="bi bi-film me-1"></i>{{ item.fragments_count }} фрагментов
+              </span>
+            </div>
+          </div>
+        </div>
+      </a>
+    </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="card text-center py-5">
+    <div class="card-body">
+      <i class="bi bi-folder2-open display-4 text-muted mb-3 d-block"></i>
+      <h5 class="text-muted">Шаблоны 3 не найдены</h5>
+      <p class="text-muted mb-0">Папки в <code>/static/templates3</code> пока отсутствуют.</p>
+    </div>
+  </div>
+{% endif %}
+{% endblock %}

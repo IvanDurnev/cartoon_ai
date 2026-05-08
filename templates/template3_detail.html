@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% block title %}Шаблон 3 {{ template_name }} — Cartoon AI{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+  <a href="{{ url_for('templates3_list') }}" class="text-muted text-decoration-none small">
+    <i class="bi bi-arrow-left me-1"></i>Назад к шаблонам 3
+  </a>
+</div>
+
+<div class="d-flex align-items-center justify-content-between mb-3 gap-2 flex-wrap">
+  <h2 class="fw-bold mb-0"><i class="bi bi-folder2-open me-2"></i>{{ template_name }}</h2>
+  <div class="d-flex align-items-center gap-2">
+    <span class="badge" style="background:#f3f0ff;color:#7c3aed;">{{ fragments|length }} фрагментов</span>
+    <span class="badge text-bg-info-subtle border border-info-subtle text-info-emphasis">Провайдер: SD + ControlNet + ReActor/FaceID</span>
+    <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-check-sd-access">
+      <i class="bi bi-shield-check me-1"></i>Проверить доступ API
+    </button>
+  </div>
+</div>
+<div id="sd-access-result" class="alert py-2 px-3 d-none" role="alert"></div>
+
+{% if fragments %}
+<div class="d-flex flex-column gap-3">
+  {% for fragment in fragments %}
+  <div class="card" data-file-name="{{ fragment.name }}">
+    <div class="card-body">
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <div class="fw-semibold"><span class="badge me-2" style="background:#7c3aed;color:#fff;">{{ loop.index }}</span>{{ fragment.name }}</div>
+        <a href="{{ fragment.url }}" target="_blank" class="small text-decoration-none">Открыть файл</a>
+      </div>
+
+      {% if fragment.media_type == "video" %}
+      <div class="rounded overflow-hidden" style="background:#000;">
+        <video controls preload="metadata" class="w-100" style="max-height:360px;"><source src="{{ fragment.url }}"></video>
+      </div>
+      <form method="POST" action="{{ url_for('save_template3_fragment_prompt', template_name=template_name) }}" class="mt-3">
+        <input type="hidden" name="file_name" value="{{ fragment.name }}">
+        <label class="form-label fw-semibold mb-1">Промпт для сцены</label>
+        <textarea name="prompt" class="form-control" rows="3" placeholder="Опишите сцену и замену персонажа...">{{ fragment.prompt }}</textarea>
+        {% set o3 = fragment.options3 or {} %}
+        <div class="row g-2 mt-1">
+          <div class="col-12 col-md-5">
+            <label class="form-label mb-1">Аватар ребёнка для замены</label>
+            <select name="child_avatar_id" class="form-select js-avatar-select">
+              <option value="">Не выбран (использовать Source Face ниже)</option>
+              {% for a in avatar_options %}
+                <option value="{{ a.avatar_id }}" data-source="{{ a.image_url }}" {% if (o3.get('child_avatar_id', '')|string) == (a.avatar_id|string) %}selected{% endif %}>{{ a.child_name }}{% if a.style_name %} — {{ a.style_name }}{% endif %}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-12 col-md-5">
+            <label class="form-label mb-1">Source Face (fallback)</label>
+            <input type="text" name="source_face_ref" class="form-control js-source-face-input" placeholder="hero_face.png или https://..." value="{{ o3.get('source_face_ref', '') }}">
+          </div>
+          <div class="col-12 col-md-4">
+            <label class="form-label mb-1">Negative Prompt</label>
+            <input type="text" name="negative_prompt" class="form-control" placeholder="lowres, blurry, artifacts" value="{{ o3.get('negative_prompt', '') }}">
+          </div>
+          <div class="col-12 col-md-3">
+            <label class="form-label mb-1">Denoise (0..1)</label>
+            <input type="number" min="0" max="1" step="0.01" name="denoise_strength" class="form-control" placeholder="0.55" value="{{ o3.get('denoise_strength', '') }}">
+          </div>
+        </div>
+        <div class="d-flex justify-content-end mt-2 gap-2">
+          <button type="submit" class="btn btn-primary btn-sm"><i class="bi bi-save me-1"></i>Сохранить промпт</button>
+          <button type="submit" formaction="{{ url_for('apply_template3_fragment_prompt', template_name=template_name) }}" class="btn btn-success btn-sm"><i class="bi bi-magic me-1"></i>Заменить персонажа</button>
+        </div>
+      </form>
+
+      {% set job = fragment.job or {} %}
+      <div class="mt-2 small js-job-status" {% if not job %}style="display:none;"{% endif %}>
+        <span class="js-job-badge"></span>
+        <span class="text-muted ms-2 js-job-updated">{% if job.updated_at %}Обновлено: {{ job.updated_at }}{% endif %}</span>
+        <div class="text-muted mt-1 js-job-message">{% if job.message %}{{ job.message }}{% endif %}</div>
+      </div>
+      <div class="mt-3 js-job-result" {% if not (job and job.output_url) %}style="display:none;"{% endif %}>
+        <div class="d-flex align-items-center justify-content-between mb-2">
+          <span class="fw-semibold text-success"><i class="bi bi-check2-circle me-1"></i>Результат</span>
+          <a href="{{ job.output_url if job and job.output_url else '#' }}" target="_blank" class="small text-decoration-none js-job-result-link">Открыть результат</a>
+        </div>
+        <div class="rounded overflow-hidden" style="background:#000;"><video controls preload="metadata" class="w-100 js-job-result-video" style="max-height:360px;"><source src="{{ job.output_url if job and job.output_url else '' }}"></video></div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+(() => {
+  const templateName = {{ template_name|tojson }};
+  const cards = Array.from(document.querySelectorAll('[data-file-name]'));
+  const accessBtn = document.getElementById('btn-check-sd-access');
+  const accessResult = document.getElementById('sd-access-result');
+  function statusBadgeHtml(status) {
+    if (status === 'queued') return '<span class="badge bg-secondary">В очереди</span>';
+    if (status === 'processing') return '<span class="badge bg-warning text-dark">Обрабатывается</span>';
+    if (status === 'completed') return '<span class="badge bg-success">Готово</span>';
+    if (status === 'failed') return '<span class="badge bg-danger">Ошибка</span>';
+    return status ? `<span class="badge bg-secondary">${status}</span>` : '';
+  }
+  function updateCard(card, job) {
+    const badge = card.querySelector('.js-job-badge');
+    const updated = card.querySelector('.js-job-updated');
+    const message = card.querySelector('.js-job-message');
+    const statusWrap = card.querySelector('.js-job-status');
+    const resultWrap = card.querySelector('.js-job-result');
+    const resultLink = card.querySelector('.js-job-result-link');
+    const resultVideo = card.querySelector('.js-job-result-video');
+    if (!badge || !updated || !message || !statusWrap || !resultWrap || !resultLink || !resultVideo) return;
+    if (!job) { statusWrap.style.display = 'none'; resultWrap.style.display = 'none'; return; }
+    statusWrap.style.display = '';
+    badge.innerHTML = statusBadgeHtml(job.status || '');
+    updated.textContent = job.updated_at ? `Обновлено: ${job.updated_at}` : '';
+    message.textContent = job.message || '';
+    if (job.output_url) {
+      resultWrap.style.display = '';
+      resultLink.href = job.output_url;
+      const src = resultVideo.querySelector('source');
+      if (src && src.getAttribute('src') !== job.output_url) { src.setAttribute('src', job.output_url); resultVideo.load(); }
+    } else {
+      resultWrap.style.display = 'none';
+    }
+  }
+  if (accessBtn && accessResult) {
+    accessBtn.addEventListener('click', async () => {
+      accessBtn.disabled = true;
+      accessResult.className = 'alert alert-info py-2 px-3';
+      accessResult.textContent = 'Проверяю доступ к SD API...';
+      try {
+        const resp = await fetch('/api/templates3/check-access', { headers: { Accept: 'application/json' } });
+        const data = await resp.json();
+        accessResult.className = `alert ${data.ok ? 'alert-success' : 'alert-danger'} py-2 px-3`;
+        accessResult.textContent = data.message || (data.ok ? 'OK' : 'Ошибка');
+      } catch (e) {
+        accessResult.className = 'alert alert-danger py-2 px-3';
+        accessResult.textContent = `Ошибка сети: ${e}`;
+      } finally { accessBtn.disabled = false; }
+    });
+  }
+  const socket = typeof io !== 'undefined' ? io() : null;
+  if (socket) {
+    socket.emit('watch_template3', { template_name: templateName });
+    socket.on('template3_job_update', (payload) => {
+      if (!payload || payload.template_name !== templateName || !payload.file_name) return;
+      const card = document.querySelector(`[data-file-name="${CSS.escape(payload.file_name)}"]`);
+      if (!card) return;
+      updateCard(card, payload.job || null);
+    });
+    window.addEventListener('beforeunload', () => socket.emit('unwatch_template3', { template_name: templateName }));
+  }
+  cards.forEach((card) => {
+    const avatarSelect = card.querySelector('.js-avatar-select');
+    const sourceInput = card.querySelector('.js-source-face-input');
+    if (avatarSelect && sourceInput) {
+      const syncSourceFaceState = () => {
+        const selected = avatarSelect.options[avatarSelect.selectedIndex];
+        const hasAvatar = !!avatarSelect.value;
+        if (hasAvatar) {
+          const source = (selected && selected.dataset && selected.dataset.source) ? selected.dataset.source : '';
+          if (source) sourceInput.value = source;
+          sourceInput.readOnly = true;
+        } else {
+          sourceInput.readOnly = false;
+        }
+      };
+      avatarSelect.addEventListener('change', syncSourceFaceState);
+      syncSourceFaceState();
+    }
+    const resultVideo = card.querySelector('.js-job-result-video');
+    if (resultVideo) resultVideo.addEventListener('error', () => resultVideo.closest('.js-job-result')?.classList.add('border', 'border-danger-subtle'));
+  });
+})();
+</script>
+{% endblock %}

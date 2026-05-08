@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Проекты — Cartoon AI{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-4">
+  <h2 class="fw-bold mb-0">
+    <i class="bi bi-collection-fill me-2"></i>Проекты
+  </h2>
+</div>
+
+{% if template_dirs %}
+  <div class="row g-3">
+    {% for item in template_dirs %}
+    <div class="col-12 col-md-6 col-lg-4">
+      <div class="card h-100 avatar-card p-3">
+        <div class="d-flex align-items-start gap-3">
+          <a href="{{ url_for('template4_detail', template_name=item.name) }}" class="text-decoration-none d-flex align-items-start gap-3 flex-grow-1">
+            <div class="rounded-3 d-flex align-items-center justify-content-center flex-shrink-0"
+                 style="width:56px;height:56px;background:#ede9fe;">
+              <i class="bi bi-folder2-open fs-4" style="color:#6d28d9;"></i>
+            </div>
+            <div class="flex-grow-1">
+              <h6 class="fw-semibold text-dark mb-2">{{ item.name }}</h6>
+              <span class="badge" style="background:#ede9fe;color:#6d28d9;">Сцены и генерация</span>
+            </div>
+          </a>
+          <form method="POST"
+                action="{{ url_for('delete_template4_project', template_name=item.name) }}"
+                onsubmit="return confirm('Удалить проект «{{ item.name }}»? Это действие нельзя отменить.')">
+            <button type="submit" class="btn btn-outline-danger btn-sm" title="Удалить проект">
+              <i class="bi bi-trash"></i>
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="card text-center py-5">
+    <div class="card-body">
+      <i class="bi bi-folder2-open display-4 text-muted mb-3 d-block"></i>
+      <h5 class="text-muted">Проекты не найдены</h5>
+      <p class="text-muted mb-0">Папки в <code>/static/templates4</code> пока отсутствуют.</p>
+      <form method="POST" action="{{ url_for('create_template4_project') }}" class="mt-4 d-flex justify-content-center gap-2 flex-wrap">
+        <input type="text" name="project_name" class="form-control" style="max-width:320px;" placeholder="Имя проекта (необязательно)">
+        <button type="submit" class="btn btn-primary">
+          <i class="bi bi-plus-circle me-1"></i>Создать проект
+        </button>
+      </form>
+    </div>
+  </div>
+{% endif %}
+{% endblock %}

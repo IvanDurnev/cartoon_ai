@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}{{ char.name }} — Cartoon AI{% endblock %}
+
+{% block content %}
+<div class="row g-4">
+
+  {# ---- Character card ---- #}
+  <div class="col-lg-4">
+    <div class="card text-center p-4">
+      {% if char.image_filename %}
+        <img src="{{ url_for('static', filename='uploads/' + char.image_filename) }}"
+             class="child-photo-lg mx-auto mb-3" alt="{{ char.name }}">
+      {% else %}
+        <div class="child-photo-lg mx-auto mb-3 d-flex align-items-center justify-content-center"
+             style="background:#f3f0ff;border-radius:50%;border:4px solid #a855f7;">
+          <i class="bi bi-person-badge" style="font-size:3rem;color:#a78bfa"></i>
+        </div>
+      {% endif %}
+      <h4 class="fw-bold mb-1">{{ char.name }}</h4>
+      <div class="text-muted small mb-3">
+        Добавлен {{ char.created_at.strftime('%d.%m.%Y') }}
+      </div>
+
+      {# Delete #}
+      <form method="POST" action="{{ url_for('delete_character', char_id=char.id) }}"
+            onsubmit="return confirm('Удалить персонажа «{{ char.name }}»?')">
+        <button class="btn btn-outline-danger btn-sm w-100">
+          <i class="bi bi-trash me-1"></i> Удалить персонажа
+        </button>
+      </form>
+    </div>
+  </div>
+
+  {# ---- Edit form ---- #}
+  <div class="col-lg-8">
+    <div class="card">
+      <div class="card-header bg-white py-3">
+        <h5 class="mb-0"><i class="bi bi-pencil-square" style="color:#7c3aed"></i> Редактировать</h5>
+      </div>
+      <div class="card-body">
+        <form method="POST" action="{{ url_for('edit_character', char_id=char.id) }}"
+              enctype="multipart/form-data">
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Имя</label>
+            <input type="text" name="name" class="form-control" value="{{ char.name }}" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Описание</label>
+            <textarea name="description" class="form-control" rows="5"
+                      placeholder="Кто этот персонаж, его характер, роль в истории…">{{ char.description or '' }}</textarea>
+          </div>
+          <div class="mb-4">
+            <label class="form-label fw-semibold">Заменить картинку</label>
+            <input type="file" name="image" class="form-control" accept="image/jpeg,image/png,image/webp">
+            <div class="form-text">Оставьте пустым, чтобы не менять картинку</div>
+          </div>
+          <div class="mb-4">
+            <label class="form-label fw-semibold">Голос</label>
+            <select name="voice_id" class="form-select" id="characterVoiceIdInput">
+              <option value="">Не выбрано</option>
+              {% set voice_ids = voice_options | map(attribute='id') | list %}
+              {% for v in voice_options %}
+              <option value="{{ v.id }}" {% if char.voice_id == v.id %}selected{% endif %}>
+                {{ v.name }} — {{ v.id }}
+              </option>
+              {% endfor %}
+              {% if char.voice_id and char.voice_id not in voice_ids %}
+              <option value="{{ char.voice_id }}" selected>Текущий (custom) — {{ char.voice_id }}</option>
+              {% endif %}
+            </select>
+            <div class="form-text">Можно проверить голос перед сохранением.</div>
+          </div>
+          <div class="mb-4">
+            <label class="form-label fw-semibold">Текст для предпрослушивания</label>
+            <input type="text" class="form-control" id="characterVoicePreviewText"
+                   value="Привет! Я персонаж этого мультфильма.">
+          </div>
+          <div class="mb-4 d-flex gap-2">
+            <button type="button" class="btn btn-outline-secondary" id="characterPreviewBtn">
+              <i class="bi bi-play-circle me-1"></i>Прослушать
+            </button>
+          </div>
+          <button type="submit" class="btn btn-primary">
+            <i class="bi bi-check-lg me-1"></i> Сохранить
+          </button>
+          <a href="{{ url_for('characters') }}" class="btn btn-outline-secondary ms-2">Назад</a>
+        </form>
+        <audio id="characterVoicePreviewAudio" controls class="w-100 mt-3" style="display:none;"></audio>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (function () {
+    const btn = document.getElementById("characterPreviewBtn");
+    const voiceInput = document.getElementById("characterVoiceIdInput");
+    const textInput = document.getElementById("characterVoicePreviewText");
+    const audio = document.getElementById("characterVoicePreviewAudio");
+    if (!btn || !voiceInput || !textInput || !audio) return;
+
+    btn.addEventListener("click", async () => {
+      const voiceId = voiceInput.value.trim();
+      const text = textInput.value.trim();
+      if (!voiceId) {
+        alert("Укажите Voice ID для предпрослушивания.");
+        return;
+      }
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Генерируем...';
+      try {
+        const formData = new FormData();
+        formData.append("voice_id", voiceId);
+        formData.append("text", text);
+        const resp = await fetch("/api/voice-preview", { method: "POST", body: formData });
+        if (!resp.ok) throw new Error("preview failed");
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        audio.src = url;
+        audio.style.display = "";
+        await audio.play();
+      } catch (_) {
+        alert("Не удалось сгенерировать предпрослушивание. Проверьте Voice ID и ElevenLabs API key.");
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-play-circle me-1"></i>Прослушать';
+      }
+    });
+  })();
+</script>
+{% endblock %}
