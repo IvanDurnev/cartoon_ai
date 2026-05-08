@@ -46,12 +46,6 @@ def create_app():
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
     os.makedirs(app.config["GENERATED_FOLDER"], exist_ok=True)
 
-    # ---- file logger so we can see callbacks even without a terminal
-    log_path = os.path.join(os.path.dirname(__file__), "cartoons.log")
-    file_handler = logging.FileHandler(log_path)
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    app.logger.addHandler(file_handler)
     app.logger.setLevel(logging.INFO)
 
     @app.context_processor
