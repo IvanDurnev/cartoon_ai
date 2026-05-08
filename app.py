@@ -543,6 +543,59 @@ def create_app():
             step = next((x for x in steps if str(x.get("id")) == str(step_id)), None)
         return scenes, scene, step
 
+    def delete_template4_step_outputs(template_dir: str, scene_id: str, step_id: str, *, output_url: str = "") -> int:
+        removed = 0
+        scene_id = str(scene_id or "").strip()
+        step_id = str(step_id or "").strip()
+        if not scene_id or not step_id:
+            return 0
+
+        assets_dir = os.path.join(template_dir, "assets")
+        processed_dir = os.path.join(template_dir, "processed")
+        prefixes = [
+            (assets_dir, f"scene_{scene_id}_step_{step_id}_"),
+            (assets_dir, f"scene_{scene_id}_step_{step_id}."),
+            (processed_dir, f"scene_{scene_id}__step_{step_id}__"),
+        ]
+
+        seen_paths: set[str] = set()
+
+        def maybe_remove(path: str) -> None:
+            nonlocal removed
+            normalized = os.path.abspath(path)
+            if normalized in seen_paths or not os.path.isfile(normalized):
+                return
+            try:
+                os.remove(normalized)
+                seen_paths.add(normalized)
+                removed += 1
+            except FileNotFoundError:
+                seen_paths.add(normalized)
+            except Exception as exc:
+                app.logger.warning("Failed to delete step artifact path=%s: %s", normalized, exc)
+
+        if output_url.startswith(f"/static/templates4/{os.path.basename(template_dir)}/"):
+            relative = output_url.replace(f"/static/templates4/{os.path.basename(template_dir)}/", "", 1)
+            maybe_remove(os.path.join(template_dir, relative))
+
+        for directory, prefix in prefixes:
+            if not os.path.isdir(directory):
+                continue
+            try:
+                for fn in os.listdir(directory):
+                    if fn.startswith(prefix):
+                        maybe_remove(os.path.join(directory, fn))
+            except Exception as exc:
+                app.logger.warning(
+                    "Failed to scan step artifacts template=%s scene=%s step=%s dir=%s: %s",
+                    os.path.basename(template_dir),
+                    scene_id,
+                    step_id,
+                    directory,
+                    exc,
+                )
+        return removed
+
     def find_template4_task_id_in_log(template_name: str, scene_id: str) -> str:
         log_path = os.path.join(os.path.dirname(__file__), "cartoons.log")
         if not os.path.isfile(log_path):
@@ -7122,6 +7175,12 @@ def create_app():
         step_pos = next((idx for idx, s in enumerate(steps_list) if str(s.get("id")) == str(step_id)), -1)
         if step_pos >= 0:
             step["name"] = f"{step_type}:{step_pos + 1}"
+        delete_template4_step_outputs(
+            template_dir,
+            scene_id,
+            step_id,
+            output_url=str(step.get("output_url") or "").strip(),
+        )
         step["type"] = step_type
         step["prompt"] = step_prompt
         step["child_avatar_id"] = child_avatar_id
@@ -7155,7 +7214,7 @@ def create_app():
         template_dir = safe_template4_dir(template_name)
         if not template_dir:
             abort(404)
-        scenes, scene, _step = get_scene_and_step(template_dir, scene_id, step_id)
+        scenes, scene, step = get_scene_and_step(template_dir, scene_id, step_id)
         if not scene:
             flash("Сцена не найдена.", "danger")
             return redirect(url_for("template4_detail", template_name=template_name))
@@ -7164,6 +7223,12 @@ def create_app():
         if len(new_steps) == len(steps):
             flash("Шаг не найден.", "warning")
             return redirect(url_for("template4_detail", template_name=template_name))
+        delete_template4_step_outputs(
+            template_dir,
+            scene_id,
+            step_id,
+            output_url=str((step or {}).get("output_url") or "").strip(),
+        )
         scene["steps"] = new_steps
         scene["updated_at"] = datetime.now(timezone.utc).isoformat()
         save_template4_scenes(template_dir, scenes)
