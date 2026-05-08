@@ -64,12 +64,6 @@
           </a>
         </li>
         <li class="nav-item">
-          <a class="nav-link {% if request.endpoint and request.endpoint.startswith('character') %}fw-semibold{% endif %}"
-             href="{{ url_for('characters') }}">
-            <i class="bi bi-person-badge-fill me-1"></i>Персонажи
-          </a>
-        </li>
-        <li class="nav-item">
           <a class="nav-link {% if request.endpoint in ('templates4_list', 'template4_detail', 'create_template4_scene', 'generate_template4_scene') %}fw-semibold{% endif %}"
              href="{{ url_for('templates4_list') }}">
             <i class="bi bi-film me-1"></i>Проекты
