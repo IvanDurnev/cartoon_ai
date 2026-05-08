@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import uuid
+import fcntl
 import subprocess
 import tempfile
 import base64
@@ -252,6 +253,17 @@ def create_app():
         assets_dir = os.path.join(template_dir, "assets")
         processed_dir = os.path.join(template_dir, "processed")
 
+        def recovered_step_id_from_filename(scene_id: str, filename: str) -> str:
+            prefix_assets = f"scene_{scene_id}_step_"
+            if filename.startswith(prefix_assets):
+                rest = filename[len(prefix_assets):]
+                return rest.split("_", 1)[0].split(".", 1)[0].strip()
+            prefix_processed = f"scene_{scene_id}__step_"
+            if filename.startswith(prefix_processed):
+                rest = filename[len(prefix_processed):]
+                return rest.split("__", 1)[0].split(".", 1)[0].strip()
+            return ""
+
         def find_matching_output(scene_id: str, step_id: str) -> str:
             prefixes = [
                 (assets_dir, f"scene_{scene_id}_step_{step_id}_"),
@@ -295,9 +307,6 @@ def create_app():
                 out_url = str(step.get("output_url") or "").strip()
                 if out_url:
                     continue
-                step_status = str(step.get("status") or "").strip().lower()
-                if step_status not in {"processing", "queued"}:
-                    continue
                 matched_url = find_matching_output(scene_id, step_id)
                 if not matched_url:
                     continue
@@ -307,6 +316,51 @@ def create_app():
                 step["updated_at"] = datetime.now(timezone.utc).isoformat()
                 scene["updated_at"] = datetime.now(timezone.utc).isoformat()
                 changed = True
+
+            known_step_ids = {
+                str(step.get("id") or "").strip()
+                for step in steps
+                if str(step.get("id") or "").strip()
+            }
+            orphan_candidates: dict[str, str] = {}
+            for directory in (assets_dir, processed_dir):
+                if not os.path.isdir(directory):
+                    continue
+                try:
+                    for fn in os.listdir(directory):
+                        recovered_step_id = recovered_step_id_from_filename(scene_id, fn)
+                        if not recovered_step_id or recovered_step_id in known_step_ids:
+                            continue
+                        rel_dir = "assets" if directory == assets_dir else "processed"
+                        orphan_candidates[recovered_step_id] = (
+                            f"/static/templates4/{os.path.basename(template_dir)}/{rel_dir}/{fn}"
+                        )
+                except Exception:
+                    continue
+            if orphan_candidates:
+                next_index = len(steps) + 1
+                for recovered_step_id, recovered_output_url in sorted(orphan_candidates.items()):
+                    steps.append(
+                        {
+                            "id": recovered_step_id,
+                            "name": f"recovered:{next_index}",
+                            "type": "edit_first_frame",
+                            "prompt": "",
+                            "child_avatar_id": None,
+                            "avatar_url": "",
+                            "source_image_ref": str(scene.get("image_ref") or "").strip(),
+                            "source_audio_ref": "",
+                            "model": "",
+                            "status": "completed",
+                            "message": "Шаг восстановлен из файла результата после несинхронного сохранения.",
+                            "output_url": recovered_output_url,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                    next_index += 1
+                    changed = True
+                scene["steps"] = steps
+                scene["updated_at"] = datetime.now(timezone.utc).isoformat()
         return scenes, changed
 
     def load_template4_scenes(template_dir: str) -> list[dict]:
@@ -329,10 +383,154 @@ def create_app():
         except Exception:
             return []
 
+    def parse_template4_timestamp(value) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw)
+        except Exception:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def template4_scene_effective_updated_at(scene: dict) -> datetime:
+        timestamps: list[datetime] = []
+        scene_dt = parse_template4_timestamp(scene.get("updated_at"))
+        if scene_dt:
+            timestamps.append(scene_dt)
+        steps = scene.get("steps") if isinstance(scene.get("steps"), list) else []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            step_dt = parse_template4_timestamp(step.get("updated_at"))
+            if step_dt:
+                timestamps.append(step_dt)
+        if timestamps:
+            return max(timestamps)
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    def merge_template4_steps(incoming_steps, existing_steps) -> list[dict]:
+        incoming_steps = incoming_steps if isinstance(incoming_steps, list) else []
+        existing_steps = existing_steps if isinstance(existing_steps, list) else []
+
+        incoming_by_id = {
+            str(step.get("id")): step
+            for step in incoming_steps
+            if isinstance(step, dict) and str(step.get("id") or "").strip()
+        }
+        existing_by_id = {
+            str(step.get("id")): step
+            for step in existing_steps
+            if isinstance(step, dict) and str(step.get("id") or "").strip()
+        }
+        ordered_ids: list[str] = []
+        for steps_list in (incoming_steps, existing_steps):
+            for step in steps_list:
+                if not isinstance(step, dict):
+                    continue
+                step_id = str(step.get("id") or "").strip()
+                if step_id and step_id not in ordered_ids:
+                    ordered_ids.append(step_id)
+
+        merged: list[dict] = []
+        for step_id in ordered_ids:
+            incoming_step = incoming_by_id.get(step_id)
+            existing_step = existing_by_id.get(step_id)
+            if incoming_step and existing_step:
+                incoming_dt = parse_template4_timestamp(incoming_step.get("updated_at")) or datetime.min.replace(tzinfo=timezone.utc)
+                existing_dt = parse_template4_timestamp(existing_step.get("updated_at")) or datetime.min.replace(tzinfo=timezone.utc)
+                merged.append(incoming_step if incoming_dt >= existing_dt else existing_step)
+            elif incoming_step:
+                merged.append(incoming_step)
+            elif existing_step:
+                merged.append(existing_step)
+        return merged
+
+    def merge_template4_scene_versions(incoming_scene: dict, existing_scene: dict) -> dict:
+        incoming_scene = dict(incoming_scene)
+        existing_scene = dict(existing_scene)
+        merged_steps = merge_template4_steps(incoming_scene.get("steps"), existing_scene.get("steps"))
+
+        incoming_dt = template4_scene_effective_updated_at(incoming_scene)
+        existing_dt = template4_scene_effective_updated_at(existing_scene)
+        base_scene = incoming_scene if incoming_dt >= existing_dt else existing_scene
+        other_scene = existing_scene if base_scene is incoming_scene else incoming_scene
+
+        merged_scene = dict(base_scene)
+        if not merged_scene.get("image_ref") and other_scene.get("image_ref"):
+            merged_scene["image_ref"] = other_scene.get("image_ref")
+        if not merged_scene.get("audio_ref") and other_scene.get("audio_ref"):
+            merged_scene["audio_ref"] = other_scene.get("audio_ref")
+        if not merged_scene.get("video_ref") and other_scene.get("video_ref"):
+            merged_scene["video_ref"] = other_scene.get("video_ref")
+        if not merged_scene.get("video_url") and other_scene.get("video_url"):
+            merged_scene["video_url"] = other_scene.get("video_url")
+        if not merged_scene.get("message") and other_scene.get("message"):
+            merged_scene["message"] = other_scene.get("message")
+        if not merged_scene.get("kling_task_id") and other_scene.get("kling_task_id"):
+            merged_scene["kling_task_id"] = other_scene.get("kling_task_id")
+        if not merged_scene.get("child_avatar_id") and other_scene.get("child_avatar_id"):
+            merged_scene["child_avatar_id"] = other_scene.get("child_avatar_id")
+        if not merged_scene.get("avatar_url") and other_scene.get("avatar_url"):
+            merged_scene["avatar_url"] = other_scene.get("avatar_url")
+        if not merged_scene.get("duration_seconds") and other_scene.get("duration_seconds"):
+            merged_scene["duration_seconds"] = other_scene.get("duration_seconds")
+        merged_scene["steps"] = merged_steps
+        merged_scene["updated_at"] = max(
+            incoming_dt,
+            existing_dt,
+            *(parse_template4_timestamp(step.get("updated_at")) or datetime.min.replace(tzinfo=timezone.utc) for step in merged_steps if isinstance(step, dict)),
+        ).isoformat()
+        return merged_scene
+
     def save_template4_scenes(template_dir: str, scenes: list[dict]) -> None:
         path = template4_scenes_path(template_dir)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(scenes, f, ensure_ascii=False, indent=2)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        lock_path = f"{path}.lock"
+        incoming_scenes = [
+            scene for scene in scenes
+            if isinstance(scene, dict) and isinstance(scene.get("id"), str)
+        ]
+        with open(lock_path, "w", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            existing_scenes: list[dict] = []
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        raw_existing = json.load(f)
+                    if isinstance(raw_existing, list):
+                        existing_scenes = [item for item in raw_existing if isinstance(item, dict) and isinstance(item.get("id"), str)]
+                except Exception:
+                    existing_scenes = []
+            if existing_scenes:
+                existing_by_id = {str(scene.get("id")): scene for scene in existing_scenes}
+                incoming_by_id = {str(scene.get("id")): scene for scene in incoming_scenes}
+                merged: list[dict] = []
+                ordered_ids: list[str] = []
+                for scene_group in (incoming_scenes, existing_scenes):
+                    for scene in scene_group:
+                        scene_id = str(scene.get("id") or "").strip()
+                        if scene_id and scene_id not in ordered_ids:
+                            ordered_ids.append(scene_id)
+                for scene_id in ordered_ids:
+                    incoming_scene = incoming_by_id.get(scene_id)
+                    existing_scene = existing_by_id.get(scene_id)
+                    if incoming_scene and existing_scene:
+                        merged.append(merge_template4_scene_versions(incoming_scene, existing_scene))
+                    elif incoming_scene:
+                        merged.append(incoming_scene)
+                    elif existing_scene:
+                        merged.append(existing_scene)
+                scenes = merged
+            else:
+                scenes = incoming_scenes
+            tmp_path = f"{path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(scenes, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, path)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def get_scene_and_step(template_dir: str, scene_id: str, step_id: str | None = None):
         scenes = load_template4_scenes(template_dir)
