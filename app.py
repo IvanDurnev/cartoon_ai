@@ -322,6 +322,11 @@ def create_app():
                 for step in steps
                 if str(step.get("id") or "").strip()
             }
+            deleted_step_ids = {
+                str(step_id).strip()
+                for step_id in (scene.get("deleted_step_ids") or [])
+                if str(step_id).strip()
+            }
             orphan_candidates: dict[str, str] = {}
             for directory in (assets_dir, processed_dir):
                 if not os.path.isdir(directory):
@@ -329,7 +334,11 @@ def create_app():
                 try:
                     for fn in os.listdir(directory):
                         recovered_step_id = recovered_step_id_from_filename(scene_id, fn)
-                        if not recovered_step_id or recovered_step_id in known_step_ids:
+                        if (
+                            not recovered_step_id
+                            or recovered_step_id in known_step_ids
+                            or recovered_step_id in deleted_step_ids
+                        ):
                             continue
                         rel_dir = "assets" if directory == assets_dir else "processed"
                         orphan_candidates[recovered_step_id] = (
@@ -411,19 +420,32 @@ def create_app():
             return max(timestamps)
         return datetime.min.replace(tzinfo=timezone.utc)
 
-    def merge_template4_steps(incoming_steps, existing_steps) -> list[dict]:
+    def merge_template4_steps(incoming_steps, existing_steps, deleted_step_ids=None) -> list[dict]:
         incoming_steps = incoming_steps if isinstance(incoming_steps, list) else []
         existing_steps = existing_steps if isinstance(existing_steps, list) else []
+        deleted_step_ids = {
+            str(step_id).strip()
+            for step_id in (deleted_step_ids or [])
+            if str(step_id).strip()
+        }
 
         incoming_by_id = {
             str(step.get("id")): step
             for step in incoming_steps
-            if isinstance(step, dict) and str(step.get("id") or "").strip()
+            if (
+                isinstance(step, dict)
+                and str(step.get("id") or "").strip()
+                and str(step.get("id") or "").strip() not in deleted_step_ids
+            )
         }
         existing_by_id = {
             str(step.get("id")): step
             for step in existing_steps
-            if isinstance(step, dict) and str(step.get("id") or "").strip()
+            if (
+                isinstance(step, dict)
+                and str(step.get("id") or "").strip()
+                and str(step.get("id") or "").strip() not in deleted_step_ids
+            )
         }
         ordered_ids: list[str] = []
         for steps_list in (incoming_steps, existing_steps):
@@ -431,7 +453,7 @@ def create_app():
                 if not isinstance(step, dict):
                     continue
                 step_id = str(step.get("id") or "").strip()
-                if step_id and step_id not in ordered_ids:
+                if step_id and step_id not in deleted_step_ids and step_id not in ordered_ids:
                     ordered_ids.append(step_id)
 
         merged: list[dict] = []
@@ -451,7 +473,18 @@ def create_app():
     def merge_template4_scene_versions(incoming_scene: dict, existing_scene: dict) -> dict:
         incoming_scene = dict(incoming_scene)
         existing_scene = dict(existing_scene)
-        merged_steps = merge_template4_steps(incoming_scene.get("steps"), existing_scene.get("steps"))
+        incoming_deleted = incoming_scene.get("deleted_step_ids") if isinstance(incoming_scene.get("deleted_step_ids"), list) else []
+        existing_deleted = existing_scene.get("deleted_step_ids") if isinstance(existing_scene.get("deleted_step_ids"), list) else []
+        merged_deleted = []
+        for step_id in [*incoming_deleted, *existing_deleted]:
+            normalized = str(step_id or "").strip()
+            if normalized and normalized not in merged_deleted:
+                merged_deleted.append(normalized)
+        merged_steps = merge_template4_steps(
+            incoming_scene.get("steps"),
+            existing_scene.get("steps"),
+            deleted_step_ids=merged_deleted,
+        )
 
         incoming_dt = template4_scene_effective_updated_at(incoming_scene)
         existing_dt = template4_scene_effective_updated_at(existing_scene)
@@ -478,6 +511,8 @@ def create_app():
         if not merged_scene.get("duration_seconds") and other_scene.get("duration_seconds"):
             merged_scene["duration_seconds"] = other_scene.get("duration_seconds")
         merged_scene["steps"] = merged_steps
+        if merged_deleted:
+            merged_scene["deleted_step_ids"] = merged_deleted
         merged_scene["updated_at"] = max(
             incoming_dt,
             existing_dt,
@@ -7230,6 +7265,11 @@ def create_app():
             output_url=str((step or {}).get("output_url") or "").strip(),
         )
         scene["steps"] = new_steps
+        deleted_step_ids = scene.get("deleted_step_ids") if isinstance(scene.get("deleted_step_ids"), list) else []
+        normalized_step_id = str(step_id or "").strip()
+        if normalized_step_id and normalized_step_id not in deleted_step_ids:
+            deleted_step_ids.append(normalized_step_id)
+        scene["deleted_step_ids"] = deleted_step_ids
         scene["updated_at"] = datetime.now(timezone.utc).isoformat()
         save_template4_scenes(template_dir, scenes)
         flash("Шаг удален.", "success")
