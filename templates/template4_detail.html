@@ -2,6 +2,23 @@
 {% block title %}Проект {{ template_name }} — Cartoon AI{% endblock %}
 
 {% block content %}
+<style>
+  .scene-summary-chip {
+    border: 1px solid #e5d9ff;
+    background: #faf7ff;
+    color: #5b21b6;
+    border-radius: 999px;
+    padding: 0.15rem 0.55rem;
+    font-size: 0.78rem;
+    line-height: 1.2;
+  }
+  .scene-toggle {
+    cursor: pointer;
+  }
+  .scene-toggle:hover {
+    background: #fcfbff;
+  }
+</style>
 <div class="mb-4">
   <a href="{{ url_for('templates4_list') }}" class="text-muted text-decoration-none small">
     <i class="bi bi-arrow-left me-1"></i>Назад к проектам
@@ -14,7 +31,9 @@
     <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#create-scene-modal">
       <i class="bi bi-plus-circle me-1"></i>Создать сцену
     </button>
-    <span class="badge text-bg-info-subtle border border-info-subtle text-info-emphasis">Максимальная длина видео: {{ max_video_seconds }} сек</span>
+    <button type="button" class="btn btn-outline-primary btn-sm" id="btn-assemble-project">
+      <i class="bi bi-film me-1"></i>Собрать видео
+    </button>
     <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-check-veo3-access">
       <i class="bi bi-shield-check me-1"></i>Проверить доступ KLING API
     </button>
@@ -22,6 +41,11 @@
 </div>
 <div id="veo3-access-result" class="alert py-2 px-3 d-none" role="alert"></div>
 <div id="template4-action-result" class="alert py-2 px-3 d-none" role="alert"></div>
+<div id="project-assembly-status"
+     class="alert py-2 px-3 {% if not project_assembly_status %}d-none{% endif %} {% if project_assembly_status == 'completed' %}alert-success{% elif project_assembly_status == 'failed' %}alert-danger{% elif project_assembly_status in ('queued', 'processing') %}alert-info{% else %}alert-secondary{% endif %}"
+     role="alert">
+  {{ project_assembly_message or '' }}
+</div>
 
 <div class="modal fade" id="create-scene-modal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-centered">
@@ -42,6 +66,11 @@
               <input type="file" name="scene_audio" class="form-control" accept="audio/*">
               <div class="form-text">Длительность будет ограничена до {{ max_video_seconds }} секунд.</div>
             </div>
+            <div class="col-12">
+              <label class="form-label">Или готовое видео сцены (необязательно)</label>
+              <input type="file" name="scene_video" class="form-control" accept="video/*">
+              <div class="form-text">Если загрузить видео, сцена сможет использоваться как готовый фрагмент без изменений при сборке финального мультфильма.</div>
+            </div>
           </div>
         </div>
         <div class="modal-footer">
@@ -58,42 +87,82 @@
   {% for scene in scenes %}
   <div class="card" data-scene-id="{{ scene.id }}">
     <div class="card-body">
-      <div class="d-flex align-items-center justify-content-between mb-2">
-        <div class="fw-semibold"><span class="badge me-2" style="background:#6d28d9;color:#fff;">{{ loop.index }}</span>Сцена</div>
+      {% set steps = scene.steps if scene.steps else [] %}
+      {% set completed_steps = steps|selectattr('status', 'equalto', 'completed')|list|length %}
+      <div class="d-flex align-items-center justify-content-between mb-2 p-2 rounded scene-toggle"
+           data-bs-toggle="collapse"
+           data-bs-target="#scene-collapse-{{ scene.id }}"
+           aria-expanded="false"
+           aria-controls="scene-collapse-{{ scene.id }}">
+        <div class="fw-semibold d-flex align-items-center flex-wrap gap-2">
+          <span class="badge" style="background:#6d28d9;color:#fff;">{{ loop.index }}</span>
+          <span>Сцена</span>
+          <span class="scene-summary-chip">Шагов: {{ steps|length }}</span>
+          <span class="scene-summary-chip">Готово: {{ completed_steps }}</span>
+          <span class="scene-summary-chip">Длительность: {{ scene.duration_seconds or 0 }} сек</span>
+          {% if scene.image_ref %}
+          <span class="scene-summary-chip">Есть кадр</span>
+          {% endif %}
+          {% if scene.audio_ref %}
+          <span class="scene-summary-chip">Есть аудио</span>
+          {% endif %}
+          {% if scene.video_ref %}
+          <span class="scene-summary-chip">Есть видео</span>
+          {% endif %}
+          {% if scene.has_ready_video %}
+          <span class="scene-summary-chip" style="border-color:#bbf7d0;background:#f0fdf4;color:#166534;">Видео готово</span>
+          {% endif %}
+        </div>
+        <button type="button"
+                class="btn btn-outline-secondary btn-sm"
+                data-bs-toggle="collapse"
+                data-bs-target="#scene-collapse-{{ scene.id }}"
+                aria-expanded="false"
+                aria-controls="scene-collapse-{{ scene.id }}">
+          Развернуть
+        </button>
       </div>
 
-      {% if scene.image_ref %}
-      <img src="{{ url_for('static', filename='templates4/' + template_name + '/' + scene.image_ref) }}" class="img-fluid rounded mb-3" style="max-height:260px;object-fit:cover;">
-      {% endif %}
+      <div class="collapse" id="scene-collapse-{{ scene.id }}">
+        {% if scene.image_ref %}
+        <img src="{{ url_for('static', filename='templates4/' + template_name + '/' + scene.image_ref) }}" class="img-fluid rounded mb-3" style="max-height:260px;object-fit:cover;">
+        {% endif %}
 
-      {% if scene.audio_ref %}
-      <audio controls class="w-100 mb-3">
-        <source src="{{ url_for('static', filename='templates4/' + template_name + '/' + scene.audio_ref) }}">
-      </audio>
-      {% endif %}
+        {% if scene.audio_ref %}
+        <audio controls class="w-100 mb-3">
+          <source src="{{ url_for('static', filename='templates4/' + template_name + '/' + scene.audio_ref) }}">
+        </audio>
+        {% endif %}
 
-      <p class="mb-2 small text-muted">Длительность: {{ scene.duration_seconds or 0 }} сек</p>
-
-      <div class="mt-3 p-3 rounded border" style="background:#faf7ff;">
-        <div class="d-flex align-items-center justify-content-between mb-2">
-          <div class="fw-semibold">Шаги сцены</div>
-          <button type="button"
-                  class="btn btn-primary btn-sm"
-                  data-bs-toggle="modal"
-                  data-bs-target="#step-create-modal-{{ scene.id }}">
-            Создать шаг
-          </button>
+        {% if scene.video_ref %}
+        <div class="mb-3 rounded overflow-hidden" style="background:#000;">
+          <video controls preload="metadata" class="w-100" style="max-height:320px;">
+            <source src="{{ url_for('static', filename='templates4/' + template_name + '/' + scene.video_ref) }}">
+          </video>
         </div>
+        {% endif %}
 
-        {% set steps = scene.steps if scene.steps else [] %}
-        {% if steps %}
-          <div class="d-flex flex-column gap-2">
-            {% for step in steps %}
-            <div class="border rounded p-2" style="background:#fff;" data-step-id="{{ step.id }}">
+        <p class="mb-2 small text-muted">Длительность: {{ scene.duration_seconds or 0 }} сек</p>
+
+        <div class="mt-3 p-3 rounded border" style="background:#faf7ff;">
+          <div class="d-flex align-items-center justify-content-between mb-2">
+            <div class="fw-semibold">Шаги сцены</div>
+            <button type="button"
+                    class="btn btn-primary btn-sm"
+                    data-bs-toggle="modal"
+                    data-bs-target="#step-create-modal-{{ scene.id }}">
+              Создать шаг
+            </button>
+          </div>
+
+          {% if steps %}
+            <div class="d-flex flex-column gap-2">
+              {% for step in steps %}
+              <div class="border rounded p-2" style="background:#fff;" data-step-id="{{ step.id }}">
               <div class="d-flex justify-content-between align-items-center">
                 <div>
-                  <span class="badge text-bg-secondary">{{ step.type }}</span>
-                  <span class="small ms-2">{{ step.prompt or 'Без промпта' }}</span>
+                  <span class="badge text-bg-secondary js-step-type">{{ step.type }}</span>
+                  <span class="small ms-2 js-step-prompt">{{ step.prompt or 'Без промпта' }}</span>
                 </div>
                 <div class="d-flex gap-1">
                   <form method="POST" action="{{ url_for('move_template4_scene_step', template_name=template_name, scene_id=scene.id, step_id=step.id) }}">
@@ -122,6 +191,10 @@
                 </div>
               </div>
               <div class="small mt-1 text-muted js-step-status">Статус: {{ step.status or 'draft' }}{% if step.message %} — {{ step.message }}{% endif %}</div>
+              {% set kling_submit = step.last_kling_submit if step.last_kling_submit else {} %}
+              <div class="small mt-1 text-muted js-step-kling-submit {% if not kling_submit %}d-none{% endif %}">
+                KLING: model={{ kling_submit.model_name or '' }}, mode={{ kling_submit.mode or '' }}, sound={{ kling_submit.sound or '' }}, duration={{ kling_submit.duration or '' }}, frame={{ kling_submit.image_ref or '' }}, audio={{ kling_submit.audio_ref or 'none' }}
+              </div>
               <div class="js-step-output-wrap {% if not step.output_url %}d-none{% endif %}">
                 <div class="mt-2">
                   <a href="{{ step.output_url or '#' }}" target="_blank" class="small text-decoration-none js-step-output-link">Открыть результат шага</a>
@@ -150,7 +223,12 @@
                     <h5 class="modal-title">Редактировать шаг</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                   </div>
-                  <form method="POST" action="{{ url_for('edit_template4_scene_step', template_name=template_name, scene_id=scene.id, step_id=step.id) }}" enctype="multipart/form-data">
+                  <form method="POST"
+                        action="{{ url_for('edit_template4_scene_step', template_name=template_name, scene_id=scene.id, step_id=step.id) }}"
+                        enctype="multipart/form-data"
+                        class="js-step-edit-form"
+                        data-scene-id="{{ scene.id }}"
+                        data-step-id="{{ step.id }}">
                     <div class="modal-body">
                       <div class="row g-2">
                         <div class="col-12 col-md-4">
@@ -164,7 +242,7 @@
                         </div>
                         <div class="col-12 col-md-8 js-step-common d-none">
                           <label class="form-label">Промпт</label>
-                          <input type="text" name="step_prompt" class="form-control form-control-sm" placeholder="Промпт шага" value="{{ step.prompt or '' }}">
+                          <textarea name="step_prompt" class="form-control form-control-sm" rows="4" placeholder="Промпт шага">{{ step.prompt or '' }}</textarea>
                         </div>
                         <div class="col-12 js-step-add-avatar d-none">
                           <label class="form-label">Аватар ребенка</label>
@@ -234,15 +312,15 @@
                   </form>
                 </div>
               </div>
+              </div>
+              {% endfor %}
             </div>
-            {% endfor %}
-          </div>
-        {% else %}
-          <div class="small text-muted">Шагов пока нет.</div>
-        {% endif %}
-      </div>
+          {% else %}
+            <div class="small text-muted">Шагов пока нет.</div>
+          {% endif %}
+        </div>
 
-      <div class="small text-muted mt-2">Итоговый результат формируется через шаги сцены.</div>
+        <div class="small text-muted mt-2">Итоговый результат формируется через шаги сцены.</div>
       </div>
 
       <div class="modal fade" id="step-create-modal-{{ scene.id }}" tabindex="-1" aria-hidden="true">
@@ -341,6 +419,17 @@
   {% endfor %}
 </div>
 {% endif %}
+
+<div class="card mt-4 {% if not final_project_video_url %}d-none{% endif %}" id="final-project-video-card">
+  <div class="card-body">
+    <div class="fw-semibold mb-3">Итоговое видео проекта</div>
+    <div class="rounded overflow-hidden" style="background:#000;">
+      <video controls preload="metadata" class="w-100" style="max-height:520px;" id="final-project-video">
+        <source src="{{ final_project_video_url or '' }}">
+      </video>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -350,8 +439,67 @@
   const templateName = {{ template_name|tojson }};
   const socket = typeof io !== 'undefined' ? io() : null;
   const accessBtn = document.getElementById('btn-check-veo3-access');
+  const assembleBtn = document.getElementById('btn-assemble-project');
   const accessResult = document.getElementById('veo3-access-result');
   const actionResult = document.getElementById('template4-action-result');
+  const projectAssemblyStatus = document.getElementById('project-assembly-status');
+  const finalProjectVideoCard = document.getElementById('final-project-video-card');
+  const finalProjectVideo = document.getElementById('final-project-video');
+  const pendingEditModalByStep = {};
+
+  function applyProjectState(projectState) {
+    const state = projectState || {};
+    const status = String(state.assembly_status || '').trim();
+    const message = String(state.assembly_message || '').trim();
+    const outputUrl = String(state.final_project_video_url || '').trim();
+    const updatedAt = String(state.updated_at || '').trim();
+
+    if (projectAssemblyStatus) {
+      if (!status && !message) {
+        projectAssemblyStatus.classList.add('d-none');
+      } else {
+        projectAssemblyStatus.classList.remove('d-none');
+        projectAssemblyStatus.className = 'alert py-2 px-3';
+        if (status === 'completed') {
+          projectAssemblyStatus.classList.add('alert-success');
+        } else if (status === 'failed') {
+          projectAssemblyStatus.classList.add('alert-danger');
+        } else if (status === 'queued' || status === 'processing') {
+          projectAssemblyStatus.classList.add('alert-info');
+        } else {
+          projectAssemblyStatus.classList.add('alert-secondary');
+        }
+        projectAssemblyStatus.textContent = message || status;
+      }
+    }
+
+    if (assembleBtn) {
+      assembleBtn.disabled = status === 'queued' || status === 'processing';
+      assembleBtn.innerHTML = (status === 'queued' || status === 'processing')
+        ? '<i class="bi bi-hourglass-split me-1"></i>Собираю...'
+        : '<i class="bi bi-film me-1"></i>Собрать видео';
+    }
+
+    if (finalProjectVideoCard && finalProjectVideo) {
+      if (!outputUrl) {
+        finalProjectVideoCard.classList.add('d-none');
+      } else {
+        finalProjectVideoCard.classList.remove('d-none');
+        const mediaUrl = updatedAt
+          ? `${outputUrl}${outputUrl.includes('?') ? '&' : '?'}v=${encodeURIComponent(updatedAt)}`
+          : outputUrl;
+        const src = finalProjectVideo.querySelector('source');
+        const needsReload = (src && src.getAttribute('src') !== mediaUrl) || finalProjectVideo.getAttribute('src') !== mediaUrl;
+        if (src) {
+          src.setAttribute('src', mediaUrl);
+        }
+        if (needsReload) {
+          finalProjectVideo.setAttribute('src', mediaUrl);
+          finalProjectVideo.load();
+        }
+      }
+    }
+  }
   if (accessBtn && accessResult) {
     accessBtn.addEventListener('click', async () => {
       accessBtn.disabled = true;
@@ -370,6 +518,11 @@
       }
     });
   }
+  if (assembleBtn && socket) {
+    assembleBtn.addEventListener('click', () => {
+      socket.emit('template4_assemble_project', { template_name: templateName });
+    });
+  }
   function applyScene(scene) {
     if (!scene || !scene.id) return;
     const card = document.querySelector(`[data-scene-id="${CSS.escape(scene.id)}"]`);
@@ -382,7 +535,22 @@
       const statusEl = stepCard.querySelector('.js-step-status');
       const stepStatus = (step.status || 'draft').trim();
       const stepMessage = (step.message || '').trim();
+      const typeEl = stepCard.querySelector('.js-step-type');
+      const promptEl = stepCard.querySelector('.js-step-prompt');
+      const klingSubmitEl = stepCard.querySelector('.js-step-kling-submit');
       if (statusEl) statusEl.textContent = `Статус: ${stepStatus}${stepMessage ? ` — ${stepMessage}` : ''}`;
+      if (typeEl) typeEl.textContent = step.type || '';
+      if (promptEl) promptEl.textContent = (step.prompt || '').trim() || 'Без промпта';
+      const lastKlingSubmit = step.last_kling_submit || null;
+      if (klingSubmitEl) {
+        if (lastKlingSubmit) {
+          klingSubmitEl.classList.remove('d-none');
+          klingSubmitEl.textContent = `KLING: model=${lastKlingSubmit.model_name || ''}, mode=${lastKlingSubmit.mode || ''}, sound=${lastKlingSubmit.sound || ''}, duration=${lastKlingSubmit.duration || ''}, frame=${lastKlingSubmit.image_ref || ''}, audio=${lastKlingSubmit.audio_ref || 'none'}`;
+        } else {
+          klingSubmitEl.classList.add('d-none');
+          klingSubmitEl.textContent = '';
+        }
+      }
 
       const outUrl = (step.output_url || '').trim();
       const stepUpdatedAt = (step.updated_at || '').trim();
@@ -421,15 +589,23 @@
       }
       if (isVideo && videoEl) {
         const src = videoEl.querySelector('source');
-        if (src && src.getAttribute('src') !== mediaUrl) {
+        const needsReload = (src && src.getAttribute('src') !== mediaUrl) || videoEl.getAttribute('src') !== mediaUrl;
+        if (src) {
           src.setAttribute('src', mediaUrl);
+        }
+        if (needsReload) {
+          videoEl.setAttribute('src', mediaUrl);
           videoEl.load();
         }
       }
       if (isAudio && audioEl) {
         const src = audioEl.querySelector('source');
-        if (src && src.getAttribute('src') !== mediaUrl) {
+        const needsReload = (src && src.getAttribute('src') !== mediaUrl) || audioEl.getAttribute('src') !== mediaUrl;
+        if (src) {
           src.setAttribute('src', mediaUrl);
+        }
+        if (needsReload) {
+          audioEl.setAttribute('src', mediaUrl);
           audioEl.load();
         }
       }
@@ -506,21 +682,79 @@
     }, 1500);
   });
 
+  document.addEventListener('submit', (event) => {
+    const form = event.target.closest('.js-step-edit-form');
+    if (!form || !socket) return;
+    const fileInput = form.querySelector('input[name="step_audio_file"]');
+    if (fileInput && fileInput.files && fileInput.files.length > 0) {
+      return; // keep normal POST for file upload edits
+    }
+    event.preventDefault();
+    const sceneId = (form.getAttribute('data-scene-id') || '').trim();
+    const stepId = (form.getAttribute('data-step-id') || '').trim();
+    const modalEl = form.closest('.modal');
+    if (stepId && modalEl && modalEl.id) {
+      pendingEditModalByStep[stepId] = modalEl.id;
+    }
+    const submitBtn = form.querySelector('button[type="submit"]');
+    const oldSubmitText = submitBtn ? submitBtn.textContent : '';
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Сохраняю...';
+    }
+    const fd = new FormData(form);
+    const activeModelInput = form.querySelector('select[name="step_model"]:not([disabled])');
+    const activeModel = activeModelInput ? String(activeModelInput.value || '').trim() : String(fd.get('step_model') || '').trim();
+    socket.emit('template4_edit_step', {
+      template_name: templateName,
+      scene_id: sceneId,
+      step_id: stepId,
+      step_type: String(fd.get('step_type') || '').trim(),
+      step_prompt: String(fd.get('step_prompt') || '').trim(),
+      step_child_avatar_id: String(fd.get('step_child_avatar_id') || '').trim(),
+      step_source_image_ref: String(fd.get('step_source_image_ref') || '').trim(),
+      step_source_audio_ref: String(fd.get('step_source_audio_ref') || '').trim(),
+      step_model: activeModel,
+    });
+    setTimeout(() => {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = oldSubmitText || 'Сохранить изменения';
+      }
+    }, 2500);
+  });
+
   if (socket) {
     socket.emit('watch_template4', { template_name: templateName });
     socket.on('template4_scenes_snapshot', (payload) => {
       if (!payload || payload.template_name !== templateName || !Array.isArray(payload.scenes)) return;
       payload.scenes.forEach((scene) => applyScene(scene));
+      if (payload.project_state) applyProjectState(payload.project_state);
     });
     socket.on('template4_job_update', (payload) => {
       if (!payload || payload.template_name !== templateName || !payload.file_name) return;
       if (payload.scene) applyScene(payload.scene);
+    });
+    socket.on('template4_project_assemble_update', (payload) => {
+      if (!payload || payload.template_name !== templateName) return;
+      applyProjectState(payload.project_state || {});
     });
     socket.on('template4_action_result', (payload) => {
       if (!actionResult || !payload) return;
       actionResult.className = `alert ${payload.ok ? 'alert-success' : 'alert-danger'} py-2 px-3`;
       actionResult.textContent = payload.message || (payload.ok ? 'OK' : 'Ошибка');
       actionResult.classList.remove('d-none');
+      if (payload.ok && payload.step_id) {
+        const modalId = pendingEditModalByStep[payload.step_id];
+        if (modalId) {
+          const modalEl = document.getElementById(modalId);
+          if (modalEl && window.bootstrap && bootstrap.Modal) {
+            const inst = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+            inst.hide();
+          }
+          delete pendingEditModalByStep[payload.step_id];
+        }
+      }
       setTimeout(() => actionResult.classList.add('d-none'), 3500);
     });
     window.addEventListener('beforeunload', () => socket.emit('unwatch_template4', { template_name: templateName }));

@@ -207,6 +207,114 @@ def create_app():
     def template4_scenes_path(template_dir: str) -> str:
         return os.path.join(template_dir, ".scenes4.json")
 
+    def template4_project_meta_path(template_dir: str) -> str:
+        return os.path.join(template_dir, ".project4.json")
+
+    def load_template4_project_meta(template_dir: str) -> dict:
+        path = template4_project_meta_path(template_dir)
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def save_template4_project_meta(template_dir: str, meta: dict) -> None:
+        path = template4_project_meta_path(template_dir)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    def update_template4_project_state(
+        template_dir: str,
+        *,
+        status: str,
+        message: str = "",
+        output_url: str = "",
+    ) -> dict:
+        meta = load_template4_project_meta(template_dir)
+        meta["assembly_status"] = status
+        meta["assembly_message"] = message
+        if output_url:
+            meta["final_project_video_url"] = output_url
+        elif status in {"queued", "processing", "failed"}:
+            meta["final_project_video_url"] = meta.get("final_project_video_url") or ""
+        meta["updated_at"] = datetime.now(timezone.utc).isoformat()
+        save_template4_project_meta(template_dir, meta)
+        template_name = os.path.basename(template_dir.rstrip("/"))
+        socketio.emit(
+            "template4_project_assemble_update",
+            {
+                "template_name": template_name,
+                "project_state": meta,
+            },
+            room=f"template4_{template_name}",
+        )
+        return meta
+
+    def reconcile_template4_scenes(template_dir: str, scenes: list[dict]) -> tuple[list[dict], bool]:
+        changed = False
+        assets_dir = os.path.join(template_dir, "assets")
+        processed_dir = os.path.join(template_dir, "processed")
+
+        def find_matching_output(scene_id: str, step_id: str) -> str:
+            prefixes = [
+                (assets_dir, f"scene_{scene_id}_step_{step_id}_"),
+                (assets_dir, f"scene_{scene_id}_step_{step_id}."),
+                (processed_dir, f"scene_{scene_id}__step_{step_id}__"),
+            ]
+            candidates: list[tuple[float, str]] = []
+            for directory, prefix in prefixes:
+                if not os.path.isdir(directory):
+                    continue
+                try:
+                    for fn in os.listdir(directory):
+                        if not fn.startswith(prefix):
+                            continue
+                        full_path = os.path.join(directory, fn)
+                        if not os.path.isfile(full_path):
+                            continue
+                        rel_dir = "assets" if directory == assets_dir else "processed"
+                        url = f"/static/templates4/{os.path.basename(template_dir)}/{rel_dir}/{fn}"
+                        try:
+                            mtime = os.path.getmtime(full_path)
+                        except Exception:
+                            mtime = 0.0
+                        candidates.append((mtime, url))
+                except Exception:
+                    continue
+            if not candidates:
+                return ""
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            return candidates[0][1]
+
+        for scene in scenes:
+            scene_id = str(scene.get("id") or "").strip()
+            if not scene_id:
+                continue
+            steps = scene.get("steps") if isinstance(scene.get("steps"), list) else []
+            for step in steps:
+                step_id = str(step.get("id") or "").strip()
+                if not step_id:
+                    continue
+                out_url = str(step.get("output_url") or "").strip()
+                if out_url:
+                    continue
+                step_status = str(step.get("status") or "").strip().lower()
+                if step_status not in {"processing", "queued"}:
+                    continue
+                matched_url = find_matching_output(scene_id, step_id)
+                if not matched_url:
+                    continue
+                step["output_url"] = matched_url
+                step["status"] = "completed"
+                step["message"] = "Шаг выполнен (восстановлено из файла результата)"
+                step["updated_at"] = datetime.now(timezone.utc).isoformat()
+                scene["updated_at"] = datetime.now(timezone.utc).isoformat()
+                changed = True
+        return scenes, changed
+
     def load_template4_scenes(template_dir: str) -> list[dict]:
         path = template4_scenes_path(template_dir)
         if not os.path.exists(path):
@@ -220,6 +328,9 @@ def create_app():
             for item in data:
                 if isinstance(item, dict) and isinstance(item.get("id"), str):
                     result.append(item)
+            result, changed = reconcile_template4_scenes(template_dir, result)
+            if changed:
+                save_template4_scenes(template_dir, result)
             return result
         except Exception:
             return []
@@ -437,6 +548,37 @@ def create_app():
         except Exception:
             pass
         return duration, fps
+
+    def probe_video_dimensions(input_path: str) -> tuple[int, int]:
+        width = 0
+        height = 0
+        try:
+            proc = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height",
+                    "-of",
+                    "json",
+                    input_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=12,
+                check=True,
+            )
+            data = json.loads(proc.stdout or "{}")
+            streams = data.get("streams") or []
+            stream = streams[0] if streams else {}
+            width = int(stream.get("width") or 0)
+            height = int(stream.get("height") or 0)
+        except Exception:
+            pass
+        return width, height
 
     def has_audio_stream(input_path: str) -> bool:
         try:
@@ -2238,13 +2380,23 @@ def create_app():
         mode = "pro" if mode_raw in {"pro", "professional"} else "std"
         enable_audio = bool(app.config.get("KLING_ENABLE_AUDIO", True))
         aspect_ratio = (app.config.get("KLING_ASPECT_RATIO") or "16:9").strip()
+        audio_ref = str(scene.get("audio_ref") or "").strip()
+        scene["__last_kling_submit"] = {
+            "model_name": model_name,
+            "mode": mode,
+            "sound": "on" if enable_audio else "off",
+            "duration": duration,
+            "aspect_ratio": aspect_ratio,
+            "image_ref": image_ref,
+            "audio_ref": audio_ref,
+        }
         base_url = (app.config.get("KLING_BASE_URL") or "").rstrip("/")
         if not base_url:
             raise RuntimeError("KLING_BASE_URL не задан.")
         path = (app.config.get("KLING_IMAGE2VIDEO_PATH") or "/v1/videos/image2video").strip()
         submit_url = f"{base_url}{path if path.startswith('/') else '/' + path}"
 
-        def build_payload(encoding: str, use_model_name: bool) -> dict:
+        def build_payload(encoding: str) -> dict:
             image_value = image_b64 if encoding == "base64" else image_url
             payload = {
                 "prompt": full_prompt,
@@ -2254,25 +2406,21 @@ def create_app():
                 "mode": mode,
                 "sound": "on" if enable_audio else "off",
                 "enable_audio": bool(enable_audio),
+                # Official API integrations use model_name for model selection.
+                # Sending a fallback `model` field can silently downgrade to platform default.
+                "model_name": model_name,
             }
-            audio_ref = str(scene.get("audio_ref") or "").strip()
             if audio_ref:
                 audio_url = to_public_asset_url(template_name, audio_ref)
                 if audio_url:
                     payload["audio"] = audio_url
                     payload["audio_url"] = audio_url
-            if use_model_name:
-                payload["model_name"] = model_name
-            else:
-                payload["model"] = model_name
             return {k: v for k, v in payload.items() if v is not None}
 
         encodings = [image_encoding, "base64" if image_encoding == "url" else "url"]
         payload_candidates = [
-            build_payload(encodings[0], False),
-            build_payload(encodings[0], True),
-            build_payload(encodings[1], False),
-            build_payload(encodings[1], True),
+            build_payload(encodings[0]),
+            build_payload(encodings[1]),
         ]
 
         max_retries = max(0, int(app.config.get("TEMPLATE4_SUBMIT_MAX_RETRIES", 4)))
@@ -2283,7 +2431,9 @@ def create_app():
             for attempt in range(max_retries + 1):
                 try:
                     if callable(status_hook):
-                        status_hook(f"Отправка в KLING... формат {payload_idx}/{len(payload_candidates)}, попытка {attempt + 1}/{max_retries + 1}")
+                        status_hook(
+                            f"Отправка в KLING... модель={model_name}, mode={mode}, sound={'on' if enable_audio else 'off'}, формат {payload_idx}/{len(payload_candidates)}, попытка {attempt + 1}/{max_retries + 1}"
+                        )
                     resp = kling_request("POST", submit_url, json_body=payload, timeout=30, allow_429_retry=False)
                     if resp.status_code == 429:
                         retry_after_raw = (resp.headers.get("Retry-After") or "").strip()
@@ -2298,11 +2448,31 @@ def create_app():
                             status_hook(f"KLING отклонил формат {payload_idx}: HTTP {resp.status_code}. Пробую альтернативу...")
                         break
                     resp.raise_for_status()
-                    app.logger.info("Template4 KLING submit accepted template=%s scene=%s payload_variant=%s status=%s", template_name, scene.get("id"), payload_idx, resp.status_code)
+                    app.logger.info(
+                        "Template4 KLING submit accepted template=%s scene=%s payload_variant=%s status=%s model_name=%s mode=%s sound=%s duration=%s",
+                        template_name,
+                        scene.get("id"),
+                        payload_idx,
+                        resp.status_code,
+                        model_name,
+                        mode,
+                        "on" if enable_audio else "off",
+                        duration,
+                    )
                     break
                 except Exception as exc:
                     last_err = exc
-                    app.logger.warning("Template4 KLING submit error template=%s scene=%s payload_variant=%s attempt=%s: %s", template_name, scene.get("id"), payload_idx, attempt + 1, exc)
+                    app.logger.warning(
+                        "Template4 KLING submit error template=%s scene=%s payload_variant=%s attempt=%s model_name=%s mode=%s sound=%s: %s",
+                        template_name,
+                        scene.get("id"),
+                        payload_idx,
+                        attempt + 1,
+                        model_name,
+                        mode,
+                        "on" if enable_audio else "off",
+                        exc,
+                    )
                     if attempt >= max_retries:
                         break
                     time.sleep(retry_base * (attempt + 1))
@@ -2510,6 +2680,19 @@ def create_app():
                     return out.replace(f"/static/templates4/{template_name}/", "", 1)
             return str(scene.get("image_ref") or "").strip()
 
+        def openai_size_for_image(image_file_path: str) -> str:
+            configured = str(app.config.get("OPENAI_AVATAR_SIZE") or "").strip()
+            try:
+                with Image.open(image_file_path) as img:
+                    width, height = img.size
+            except Exception:
+                return configured or "1024x1024"
+            if width > height:
+                return "1536x1024"
+            if height > width:
+                return "1024x1536"
+            return configured or "1024x1024"
+
         if step_type in {"edit_first_frame", "add_avatar_to_first_frame", "openai_image_edit", "openai_insert_avatar"}:
             if not app.config.get("OPENAI_API_KEY"):
                 raise RuntimeError("OPENAI_API_KEY не задан в .env.")
@@ -2523,6 +2706,9 @@ def create_app():
                 raise RuntimeError("Исходная картинка сцены не найдена.")
             avatar_ref = str(step.get("avatar_url") or scene.get("avatar_url") or "").strip()
             openai_model = (step.get("model") or app.config["OPENAI_AVATAR_MODEL"] or "").strip()
+            target_size = openai_size_for_image(image_path)
+            if callable(status_hook):
+                status_hook(f"OpenAI: сохраняю пропорции исходного кадра, size={target_size}...")
             with open(image_path, "rb") as base_img:
                 if step_type in {"openai_insert_avatar", "add_avatar_to_first_frame"}:
                     if not avatar_ref:
@@ -2548,7 +2734,7 @@ def create_app():
                                 model=openai_model,
                                 image=[base_img, avatar_img],
                                 prompt=insert_prompt,
-                                size=app.config["OPENAI_AVATAR_SIZE"],
+                                size=target_size,
                             )
                     except Exception as exc:
                         raise RuntimeError(f"Не удалось вставить аватар в кадр через OpenAI: {exc}") from exc
@@ -2565,7 +2751,7 @@ def create_app():
                         model=openai_model,
                         image=base_img,
                         prompt=step_prompt,
-                        size=app.config["OPENAI_AVATAR_SIZE"],
+                        size=target_size,
                     )
             data = getattr(result, "data", None) or []
             if not data:
@@ -2607,12 +2793,25 @@ def create_app():
             step_model = str(step.get("model") or "").strip()
             if step_model:
                 scene_for_video["kling_model"] = step_model
+            mode_raw = (app.config.get("KLING_MODE") or "standard").strip().lower()
+            step["last_kling_submit"] = {
+                "model_name": scene_for_video.get("kling_model") or app.config.get("KLING_MODEL") or "",
+                "mode": "pro" if mode_raw in {"pro", "professional"} else "std",
+                "sound": "on" if bool(app.config.get("KLING_ENABLE_AUDIO", True)) else "off",
+                "duration": 10 if int(scene_for_video.get("duration_seconds") or 8) > 5 else 5,
+                "aspect_ratio": (app.config.get("KLING_ASPECT_RATIO") or "16:9").strip(),
+                "image_ref": source_image_ref,
+                "audio_ref": source_audio_ref,
+            }
             scene_for_video["__step_id"] = str(step.get("id") or "").strip()
             if callable(status_hook):
                 status_hook(
-                    f"Kling: запускаю генерацию видео шага (кадр={source_image_ref}, аудио={source_audio_ref or 'без аудио'})..."
+                    f"Kling: запускаю генерацию видео шага (модель={scene_for_video.get('kling_model') or app.config.get('KLING_MODEL')}, кадр={source_image_ref}, аудио={source_audio_ref or 'без аудио'})..."
                 )
-            return run_template4_veo3_job(template_name, scene_for_video, status_hook=status_hook)
+            result_url = run_template4_veo3_job(template_name, scene_for_video, status_hook=status_hook)
+            if scene_for_video.get("__last_kling_submit"):
+                step["last_kling_submit"] = scene_for_video.get("__last_kling_submit")
+            return result_url
 
         raise RuntimeError(f"Неизвестный тип шага: {step_type}")
 
@@ -3845,14 +4044,39 @@ def create_app():
             return False
         if not scene_video_paths:
             return False
-        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt") as concat_file:
-            concat_path = concat_file.name
-            for p in scene_video_paths:
-                escaped = p.replace("'", "'\\''")
-                concat_file.write(f"file '{escaped}'\n")
         try:
+            cmd = ["ffmpeg", "-y"]
+            for p in scene_video_paths:
+                cmd.extend(["-i", p])
+            concat_inputs = "".join([f"[{idx}:v:0][{idx}:a:0]" for idx in range(len(scene_video_paths))])
+            filter_complex = f"{concat_inputs}concat=n={len(scene_video_paths)}:v=1:a=1[outv][outa]"
+            cmd.extend(
+                [
+                    "-filter_complex",
+                    filter_complex,
+                    "-map",
+                    "[outv]",
+                    "-map",
+                    "[outa]",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "18",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-ar",
+                    "44100",
+                    "-movflags",
+                    "+faststart",
+                    output_path,
+                ]
+            )
             subprocess.run(
-                ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_path, "-c", "copy", output_path],
+                cmd,
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -3860,11 +4084,133 @@ def create_app():
             )
             return True
         except Exception as exc:
-            app.logger.error("stitch_videos failed: %s", exc)
+            stderr = ""
+            if hasattr(exc, "stderr") and exc.stderr:
+                stderr = str(exc.stderr)[-1200:]
+            app.logger.error("stitch_videos failed: %s stderr=%s", exc, stderr)
             return False
-        finally:
-            if os.path.exists(concat_path):
-                os.remove(concat_path)
+
+    def video_has_audio(input_path: str) -> bool:
+        try:
+            proc = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a",
+                    "-show_entries",
+                    "stream=codec_type",
+                    "-of",
+                    "csv=p=0",
+                    input_path,
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            return bool((proc.stdout or "").strip())
+        except Exception:
+            return False
+
+    def normalize_video_for_concat(input_path: str, output_path: str, *, target_width: int, target_height: int) -> bool:
+        if not ffmpeg_available():
+            return False
+        has_audio = video_has_audio(input_path)
+        scale_pad_filter = (
+            f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:black,"
+            "fps=30,setsar=1"
+        )
+        if has_audio:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", input_path,
+                "-vf", scale_pad_filter,
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-ac", "2",
+                "-ar", "44100",
+                "-movflags", "+faststart",
+                output_path,
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", input_path,
+                "-f", "lavfi",
+                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-shortest",
+                "-vf", scale_pad_filter,
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-ac", "2",
+                "-ar", "44100",
+                "-movflags", "+faststart",
+                output_path,
+            ]
+        try:
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            return os.path.isfile(output_path)
+        except Exception as exc:
+            stderr = ""
+            if hasattr(exc, "stderr") and exc.stderr:
+                stderr = str(exc.stderr)[-1200:]
+            app.logger.error("normalize_video_for_concat failed input=%s error=%s stderr=%s", input_path, exc, stderr)
+            return False
+
+    def resolve_template4_scene_ready_video(scene: dict, template_name: str, template_dir: str) -> tuple[str, str]:
+        video_ref = str(scene.get("video_ref") or "").strip()
+        if video_ref:
+            video_path = os.path.abspath(os.path.join(template_dir, video_ref))
+            if os.path.isfile(video_path):
+                return video_path, f"/static/templates4/{template_name}/{video_ref}"
+        steps = scene.get("steps") if isinstance(scene.get("steps"), list) else []
+        for step in reversed(steps):
+            if str(step.get("status") or "").lower() != "completed":
+                continue
+            out = str(step.get("output_url") or "").strip()
+            if not out.lower().endswith((".mp4", ".mov", ".webm", ".m4v")):
+                continue
+            if out.startswith(f"/static/templates4/{template_name}/"):
+                rel = out.replace(f"/static/templates4/{template_name}/", "", 1)
+                video_path = os.path.abspath(os.path.join(template_dir, rel))
+                if os.path.isfile(video_path):
+                    return video_path, out
+        return "", ""
+
+    def latest_template4_project_video_url(template_name: str, template_dir: str) -> str:
+        processed_dir = os.path.join(template_dir, "processed")
+        if not os.path.isdir(processed_dir):
+            return ""
+        candidates: list[tuple[float, str]] = []
+        try:
+            for fn in os.listdir(processed_dir):
+                if not fn.startswith("project_final_") or not fn.lower().endswith(".mp4"):
+                    continue
+                full = os.path.join(processed_dir, fn)
+                if not os.path.isfile(full):
+                    continue
+                candidates.append((os.path.getmtime(full), fn))
+        except Exception:
+            return ""
+        if not candidates:
+            return ""
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return f"/static/templates4/{template_name}/processed/{candidates[0][1]}"
 
     def eleven_tts(narration_text: str, output_mp3_path: str, voice_id: str | None = None) -> bool:
         effective_voice_id = voice_id or app.config["ELEVENLABS_VOICE_ID"]
@@ -6175,6 +6521,9 @@ def create_app():
                             },
                         )
                         seen.add(ref)
+            ready_video_path, ready_video_url = resolve_template4_scene_ready_video(sc, template_name, template_dir)
+            sc["has_ready_video"] = bool(ready_video_path)
+            sc["ready_video_url"] = ready_video_url
             sc["image_candidates"] = image_candidates
             audio_candidates = []
             audio_ref = str(sc.get("audio_ref") or "").strip()
@@ -6200,6 +6549,8 @@ def create_app():
                     kling_models.append(val)
         if kling_default and kling_default not in kling_models:
             kling_models.insert(0, kling_default)
+        project_meta = load_template4_project_meta(template_dir)
+        final_project_video_url = str(project_meta.get("final_project_video_url") or "").strip() or latest_template4_project_video_url(template_name, template_dir)
         return render_template(
             "template4_detail.html",
             template_name=template_name,
@@ -6210,6 +6561,9 @@ def create_app():
             openai_image_models=openai_image_models,
             kling_models=kling_models,
             max_video_seconds=int(app.config.get("TEMPLATE4_MAX_VIDEO_SECONDS", 10)),
+            final_project_video_url=final_project_video_url,
+            project_assembly_status=str(project_meta.get("assembly_status") or "").strip(),
+            project_assembly_message=str(project_meta.get("assembly_message") or "").strip(),
         )
 
     @app.route("/templates4/<template_name>/scene", methods=["POST"])
@@ -6219,6 +6573,7 @@ def create_app():
             abort(404)
         image_file = request.files.get("scene_image")
         audio_file = request.files.get("scene_audio")
+        video_file = request.files.get("scene_video")
         prompt = ""
         child_avatar_id = None
         avatar_url = ""
@@ -6235,6 +6590,7 @@ def create_app():
             image_ref = f"assets/{image_name}"
 
         audio_name = ""
+        video_name = ""
         duration_seconds = 8
         max_seconds = int(app.config.get("TEMPLATE4_MAX_VIDEO_SECONDS", 10))
         if audio_file and audio_file.filename:
@@ -6243,12 +6599,24 @@ def create_app():
             audio_path = os.path.join(assets_dir, audio_name)
             audio_file.save(audio_path)
             duration_seconds = max(1, min(max_seconds, int(round(probe_audio_duration_seconds(audio_path) or 0)) or 1))
+        if video_file and video_file.filename:
+            video_ext = os.path.splitext(video_file.filename or "")[1].lower() or ".mp4"
+            video_name = f"scene_{scene_id}{video_ext}"
+            video_path = os.path.join(assets_dir, video_name)
+            video_file.save(video_path)
+            try:
+                video_duration, _video_fps = probe_video_timing(video_path)
+                if video_duration and video_duration > 0:
+                    duration_seconds = max(1, min(max_seconds, int(round(video_duration)) or 1))
+            except Exception:
+                pass
 
         scene = {
             "id": scene_id,
             "prompt": prompt,
             "image_ref": image_ref,
             "audio_ref": f"assets/{audio_name}" if audio_name else "",
+            "video_ref": f"assets/{video_name}" if video_name else "",
             "child_avatar_id": child_avatar_id,
             "avatar_url": avatar_url,
             "kling_task_id": "",
@@ -6275,7 +6643,9 @@ def create_app():
         child_avatar_id_raw = (request.form.get("step_child_avatar_id") or "").strip()
         source_image_ref = (request.form.get("step_source_image_ref") or "").strip()
         source_audio_ref = (request.form.get("step_source_audio_ref") or "").strip()
-        step_model = (request.form.get("step_model") or "").strip()
+        step_model_values = [(v or "").strip() for v in request.form.getlist("step_model")]
+        step_model_values = [v for v in step_model_values if v]
+        step_model = step_model_values[-1] if step_model_values else ""
         audio_file = request.files.get("step_audio_file")
         if step_type not in {"add_avatar_to_first_frame", "edit_first_frame", "generate_video"}:
             flash("Некорректный тип шага.", "danger")
@@ -6305,6 +6675,8 @@ def create_app():
         if step_type == "generate_video" and not source_image_ref:
             flash("Для шага генерации видео нужно выбрать первый кадр.", "danger")
             return redirect(url_for("template4_detail", template_name=template_name))
+        if step_type == "generate_video" and not step_model:
+            step_model = (app.config.get("KLING_MODEL") or "").strip()
         if step_type == "generate_video" and audio_file and audio_file.filename:
             assets_dir = os.path.join(template_dir, "assets")
             os.makedirs(assets_dir, exist_ok=True)
@@ -6338,68 +6710,71 @@ def create_app():
 
     @app.route("/templates4/<template_name>/scenes/<scene_id>/steps/<step_id>/edit", methods=["POST"])
     def edit_template4_scene_step(template_name, scene_id, step_id):
-        template_dir = safe_template4_dir(template_name)
-        if not template_dir:
-            abort(404)
-        step_type = (request.form.get("step_type") or "").strip()
-        step_prompt = (request.form.get("step_prompt") or "").strip()
-        child_avatar_id_raw = (request.form.get("step_child_avatar_id") or "").strip()
-        source_image_ref = (request.form.get("step_source_image_ref") or "").strip()
-        source_audio_ref = (request.form.get("step_source_audio_ref") or "").strip()
-        step_model = (request.form.get("step_model") or "").strip()
-        audio_file = request.files.get("step_audio_file")
-        if step_type not in {"add_avatar_to_first_frame", "edit_first_frame", "generate_video"}:
-            flash("Некорректный тип шага.", "danger")
-            return redirect(url_for("template4_detail", template_name=template_name))
-        scenes, scene, step = get_scene_and_step(template_dir, scene_id, step_id)
-        if not scene or not step:
-            flash("Шаг/сцена не найдены.", "danger")
-            return redirect(url_for("template4_detail", template_name=template_name))
+        try:
+            template_dir = safe_template4_dir(template_name)
+            if not template_dir:
+                abort(404)
+            step_type = (request.form.get("step_type") or "").strip()
+            step_prompt = (request.form.get("step_prompt") or "").strip()
+            child_avatar_id_raw = (request.form.get("step_child_avatar_id") or "").strip()
+            source_image_ref = (request.form.get("step_source_image_ref") or "").strip()
+            source_audio_ref = (request.form.get("step_source_audio_ref") or "").strip()
+            step_model_values = [(v or "").strip() for v in request.form.getlist("step_model")]
+            step_model_values = [v for v in step_model_values if v]
+            step_model = step_model_values[-1] if step_model_values else ""
+            audio_file = request.files.get("step_audio_file")
+            if step_type not in {"add_avatar_to_first_frame", "edit_first_frame", "generate_video"}:
+                flash("Некорректный тип шага.", "danger")
+                return redirect(url_for("template4_detail", template_name=template_name))
+            scenes, scene, step = get_scene_and_step(template_dir, scene_id, step_id)
+            if not scene or not step:
+                flash("Шаг/сцена не найдены.", "danger")
+                return redirect(url_for("template4_detail", template_name=template_name))
 
-        avatar_url = ""
-        child_avatar_id = None
-        if child_avatar_id_raw:
-            try:
-                child_avatar_id = int(child_avatar_id_raw)
-                avatar = CartoonAvatar.query.get(child_avatar_id)
-                if avatar and avatar.status == "completed":
-                    avatar_url = (avatar.image_url or "").strip()
-            except Exception:
-                child_avatar_id = None
-        if step_type in {"add_avatar_to_first_frame", "edit_first_frame"} and not source_image_ref:
-            flash("Для шага нужно выбрать кадр.", "danger")
+            avatar_url = ""
+            child_avatar_id = None
+            if child_avatar_id_raw:
+                try:
+                    child_avatar_id = int(child_avatar_id_raw)
+                    avatar = CartoonAvatar.query.get(child_avatar_id)
+                    if avatar and avatar.status == "completed":
+                        avatar_url = (avatar.image_url or "").strip()
+                except Exception:
+                    child_avatar_id = None
+            if step_type in {"add_avatar_to_first_frame", "edit_first_frame"} and not source_image_ref:
+                flash("Для шага нужно выбрать кадр.", "danger")
+                return redirect(url_for("template4_detail", template_name=template_name))
+            if step_type == "add_avatar_to_first_frame" and not child_avatar_id:
+                flash("Для шага добавления аватара нужно выбрать аватар ребенка.", "danger")
+                return redirect(url_for("template4_detail", template_name=template_name))
+            if step_type == "generate_video" and not source_image_ref:
+                flash("Для шага генерации видео нужно выбрать первый кадр.", "danger")
+                return redirect(url_for("template4_detail", template_name=template_name))
+            if step_type == "generate_video" and audio_file and audio_file.filename:
+                assets_dir = os.path.join(template_dir, "assets")
+                os.makedirs(assets_dir, exist_ok=True)
+                audio_ext = os.path.splitext(audio_file.filename or "")[1].lower() or ".mp3"
+                audio_name = f"step_{uuid.uuid4().hex[:10]}{audio_ext}"
+                audio_path = os.path.join(assets_dir, audio_name)
+                audio_file.save(audio_path)
+                source_audio_ref = f"assets/{audio_name}"
+            ok, msg = edit_template4_step_fields(
+                template_name,
+                scene_id,
+                step_id,
+                step_type=step_type,
+                step_prompt=step_prompt,
+                child_avatar_id_raw=child_avatar_id_raw,
+                source_image_ref=source_image_ref,
+                source_audio_ref=source_audio_ref,
+                step_model=step_model,
+            )
+            flash(msg, "success" if ok else "danger")
             return redirect(url_for("template4_detail", template_name=template_name))
-        if step_type == "add_avatar_to_first_frame" and not child_avatar_id:
-            flash("Для шага добавления аватара нужно выбрать аватар ребенка.", "danger")
+        except Exception as exc:
+            app.logger.exception("Template4 step edit failed template=%s scene=%s step=%s: %s", template_name, scene_id, step_id, exc)
+            flash(f"Не удалось сохранить шаг: {exc}", "danger")
             return redirect(url_for("template4_detail", template_name=template_name))
-        if step_type == "generate_video" and not source_image_ref:
-            flash("Для шага генерации видео нужно выбрать первый кадр.", "danger")
-            return redirect(url_for("template4_detail", template_name=template_name))
-        if step_type == "generate_video" and audio_file and audio_file.filename:
-            assets_dir = os.path.join(template_dir, "assets")
-            os.makedirs(assets_dir, exist_ok=True)
-            audio_ext = os.path.splitext(audio_file.filename or "")[1].lower() or ".mp3"
-            audio_name = f"step_{uuid.uuid4().hex[:10]}{audio_ext}"
-            audio_path = os.path.join(assets_dir, audio_name)
-            audio_file.save(audio_path)
-            source_audio_ref = f"assets/{audio_name}"
-
-        step["name"] = f"{step_type}:{(scene.get('steps') or []).index(step) + 1}" if step in (scene.get("steps") or []) else step.get("name")
-        step["type"] = step_type
-        step["prompt"] = step_prompt
-        step["child_avatar_id"] = child_avatar_id
-        step["avatar_url"] = avatar_url
-        step["source_image_ref"] = source_image_ref
-        step["source_audio_ref"] = source_audio_ref
-        step["model"] = step_model
-        step["status"] = "draft"
-        step["message"] = "Шаг изменен. Запустите заново."
-        step["output_url"] = ""
-        step["updated_at"] = datetime.now(timezone.utc).isoformat()
-        scene["updated_at"] = datetime.now(timezone.utc).isoformat()
-        save_template4_scenes(template_dir, scenes)
-        flash("Шаг обновлен.", "success")
-        return redirect(url_for("template4_detail", template_name=template_name))
 
     @app.route("/templates4/<template_name>/scenes/<scene_id>/steps/<step_id>/run", methods=["POST"])
     def run_template4_scene_step_route(template_name, scene_id, step_id):
@@ -6447,6 +6822,75 @@ def create_app():
             return False, f"Не удалось поставить шаг в очередь: {exc}"
         return True, "Запуск шага поставлен в очередь."
 
+    def edit_template4_step_fields(
+        template_name: str,
+        scene_id: str,
+        step_id: str,
+        *,
+        step_type: str,
+        step_prompt: str,
+        child_avatar_id_raw: str,
+        source_image_ref: str,
+        source_audio_ref: str,
+        step_model: str,
+    ) -> tuple[bool, str]:
+        template_dir = safe_template4_dir(template_name)
+        if not template_dir:
+            return False, "Шаблон не найден."
+        scenes, scene, step = get_scene_and_step(template_dir, scene_id, step_id)
+        if not scene or not step:
+            return False, "Шаг/сцена не найдены."
+        if step_type not in {"add_avatar_to_first_frame", "edit_first_frame", "generate_video"}:
+            return False, "Некорректный тип шага."
+        avatar_url = ""
+        child_avatar_id = None
+        if child_avatar_id_raw:
+            try:
+                child_avatar_id = int(child_avatar_id_raw)
+                avatar = CartoonAvatar.query.get(child_avatar_id)
+                if avatar and avatar.status == "completed":
+                    avatar_url = (avatar.image_url or "").strip()
+            except Exception:
+                child_avatar_id = None
+        if step_type in {"add_avatar_to_first_frame", "edit_first_frame"} and not source_image_ref:
+            return False, "Для шага нужно выбрать кадр."
+        if step_type == "add_avatar_to_first_frame" and not child_avatar_id:
+            return False, "Для шага добавления аватара нужно выбрать аватар ребенка."
+        if step_type == "generate_video" and not source_image_ref:
+            return False, "Для шага генерации видео нужно выбрать первый кадр."
+
+        steps_list = scene.get("steps") if isinstance(scene.get("steps"), list) else []
+        step_pos = next((idx for idx, s in enumerate(steps_list) if str(s.get("id")) == str(step_id)), -1)
+        if step_pos >= 0:
+            step["name"] = f"{step_type}:{step_pos + 1}"
+        step["type"] = step_type
+        step["prompt"] = step_prompt
+        step["child_avatar_id"] = child_avatar_id
+        step["avatar_url"] = avatar_url
+        step["source_image_ref"] = source_image_ref
+        step["source_audio_ref"] = source_audio_ref
+        normalized_model = (step_model or "").strip()
+        if step_type == "generate_video" and not normalized_model:
+            normalized_model = str(step.get("model") or app.config.get("KLING_MODEL") or "").strip()
+        step["model"] = normalized_model
+        step["status"] = "draft"
+        step["message"] = "Шаг изменен. Запустите заново."
+        step["output_url"] = ""
+        step["updated_at"] = datetime.now(timezone.utc).isoformat()
+        scene["updated_at"] = datetime.now(timezone.utc).isoformat()
+        save_template4_scenes(template_dir, scenes)
+        socketio.emit(
+            "template4_job_update",
+            {
+                "template_name": template_name,
+                "file_name": scene_id,
+                "job": {"status": "draft", "message": "Шаг обновлен"},
+                "scene": scene,
+            },
+            room=f"template4_{template_name}",
+        )
+        return True, "Шаг обновлен."
+
     @app.route("/templates4/<template_name>/scenes/<scene_id>/steps/<step_id>/delete", methods=["POST"])
     def delete_template4_scene_step(template_name, scene_id, step_id):
         template_dir = safe_template4_dir(template_name)
@@ -6493,6 +6937,66 @@ def create_app():
         scene["updated_at"] = datetime.now(timezone.utc).isoformat()
         save_template4_scenes(template_dir, scenes)
         return redirect(url_for("template4_detail", template_name=template_name))
+
+    @app.route("/templates4/<template_name>/assemble", methods=["POST"])
+    def assemble_template4_project_video(template_name):
+        ok, message, _url = assemble_template4_project_video_job(template_name)
+        flash(message, "success" if ok else "danger")
+        return redirect(url_for("template4_detail", template_name=template_name))
+
+    def assemble_template4_project_video_job(template_name: str) -> tuple[bool, str, str]:
+        template_dir = safe_template4_dir(template_name)
+        if not template_dir:
+            return False, "Проект не найден.", ""
+        scenes = load_template4_scenes(template_dir)
+        if not scenes:
+            return False, "В проекте нет сцен для сборки.", ""
+        scene_video_paths: list[str] = []
+        update_template4_project_state(template_dir, status="processing", message="Проверяю готовые видео по сценам...", output_url="")
+        for idx, scene in enumerate(scenes, start=1):
+            video_path, _video_url = resolve_template4_scene_ready_video(scene, template_name, template_dir)
+            if not video_path:
+                update_template4_project_state(template_dir, status="failed", message=f"Сцена {idx} не содержит готового видео для сборки.")
+                return False, f"Сцена {idx} не содержит готового видео для сборки.", ""
+            scene_video_paths.append(video_path)
+
+        processed_dir = os.path.join(template_dir, "processed")
+        os.makedirs(processed_dir, exist_ok=True)
+        output_name = f"project_final_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')}.mp4"
+        output_path = os.path.join(processed_dir, output_name)
+        output_url = f"/static/templates4/{template_name}/processed/{output_name}"
+        target_width, target_height = probe_video_dimensions(scene_video_paths[0])
+        if target_width <= 0 or target_height <= 0:
+            target_width, target_height = 1280, 720
+
+        normalized_paths: list[str] = []
+        try:
+            for idx, input_path in enumerate(scene_video_paths, start=1):
+                update_template4_project_state(template_dir, status="processing", message=f"Подготавливаю сцену {idx}/{len(scene_video_paths)} к сборке...")
+                normalized_path = os.path.join(processed_dir, f".concat_norm_{idx}_{uuid.uuid4().hex[:8]}.mp4")
+                if not normalize_video_for_concat(
+                    input_path,
+                    normalized_path,
+                    target_width=target_width,
+                    target_height=target_height,
+                ):
+                    update_template4_project_state(template_dir, status="failed", message=f"Не удалось подготовить сцену {idx} к сборке.")
+                    return False, f"Не удалось подготовить сцену {idx} к сборке.", ""
+                normalized_paths.append(normalized_path)
+            update_template4_project_state(template_dir, status="processing", message="Склеиваю сцены в итоговое видео...")
+            if not stitch_videos(normalized_paths, output_path):
+                update_template4_project_state(template_dir, status="failed", message="Не удалось собрать итоговое видео проекта.")
+                return False, "Не удалось собрать итоговое видео проекта.", ""
+        finally:
+            for tmp_path in normalized_paths:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+
+        update_template4_project_state(template_dir, status="completed", message="Итоговое видео проекта собрано.", output_url=output_url)
+        return True, "Итоговое видео проекта собрано.", output_url
 
     @app.route("/templates4/<template_name>/generate", methods=["POST"])
     def generate_template4_scene(template_name):
@@ -7003,11 +7507,13 @@ def create_app():
             join_room(f"template4_{template_name}")
             template_dir = safe_template4_dir(str(template_name))
             scenes = load_template4_scenes(template_dir) if template_dir else []
+            project_state = load_template4_project_meta(template_dir) if template_dir else {}
             socketio.emit(
                 "template4_scenes_snapshot",
                 {
                     "template_name": template_name,
                     "scenes": scenes,
+                    "project_state": project_state,
                 },
                 room=request.sid,
             )
@@ -7037,6 +7543,86 @@ def create_app():
             {"ok": bool(ok), "message": message, "scene_id": scene_id, "step_id": step_id},
             room=request.sid,
         )
+
+    @socketio.on("template4_edit_step")
+    def on_template4_edit_step(data):
+        payload = data or {}
+        template_name = str(payload.get("template_name") or "").strip()
+        scene_id = str(payload.get("scene_id") or "").strip()
+        step_id = str(payload.get("step_id") or "").strip()
+        step_type = str(payload.get("step_type") or "").strip()
+        step_prompt = str(payload.get("step_prompt") or "").strip()
+        child_avatar_id_raw = str(payload.get("step_child_avatar_id") or "").strip()
+        source_image_ref = str(payload.get("step_source_image_ref") or "").strip()
+        source_audio_ref = str(payload.get("step_source_audio_ref") or "").strip()
+        step_model = str(payload.get("step_model") or "").strip()
+        if not template_name or not scene_id or not step_id:
+            socketio.emit(
+                "template4_action_result",
+                {"ok": False, "message": "Не переданы template_name / scene_id / step_id."},
+                room=request.sid,
+            )
+            return
+        ok, message = edit_template4_step_fields(
+            template_name,
+            scene_id,
+            step_id,
+            step_type=step_type,
+            step_prompt=step_prompt,
+            child_avatar_id_raw=child_avatar_id_raw,
+            source_image_ref=source_image_ref,
+            source_audio_ref=source_audio_ref,
+            step_model=step_model,
+        )
+        socketio.emit(
+            "template4_action_result",
+            {"ok": bool(ok), "message": message, "scene_id": scene_id, "step_id": step_id},
+            room=request.sid,
+        )
+
+    @socketio.on("template4_assemble_project")
+    def on_template4_assemble_project(data):
+        payload = data or {}
+        template_name = str(payload.get("template_name") or "").strip()
+        if not template_name:
+            socketio.emit(
+                "template4_action_result",
+                {"ok": False, "message": "Не передан template_name."},
+                room=request.sid,
+            )
+            return
+        template_dir = safe_template4_dir(template_name)
+        if not template_dir:
+            socketio.emit(
+                "template4_action_result",
+                {"ok": False, "message": "Проект не найден."},
+                room=request.sid,
+            )
+            return
+        project_state = load_template4_project_meta(template_dir)
+        if str(project_state.get("assembly_status") or "").strip().lower() == "processing":
+            socketio.emit(
+                "template4_action_result",
+                {"ok": False, "message": "Сборка уже выполняется."},
+                room=request.sid,
+            )
+            return
+
+        update_template4_project_state(template_dir, status="queued", message="Сборка проекта поставлена в очередь...", output_url="")
+        socketio.emit(
+            "template4_action_result",
+            {"ok": True, "message": "Сборка проекта запущена."},
+            room=request.sid,
+        )
+
+        def _assemble_task():
+            try:
+                assemble_template4_project_video_job(template_name)
+            except Exception as exc:
+                app.logger.exception("Template4 project assemble failed template=%s: %s", template_name, exc)
+                update_template4_project_state(template_dir, status="failed", message=f"Ошибка сборки: {exc}")
+
+        socketio.start_background_task(_assemble_task)
 
     ensure_template4_worker_started()
     resume_template4_processing_jobs()

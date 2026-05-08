@@ -115,7 +115,7 @@ class Config:
     SERVER = os.environ.get("SERVER", "").rstrip("/")
 
     UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "static", "uploads")
-    MAX_CONTENT_LENGTH = 10 * 1024 * 1024  # 10 MB
+    MAX_CONTENT_LENGTH = 25 * 1024 * 1024  # 25 MB
     ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
     GENERATED_FOLDER = os.path.join(os.path.dirname(__file__), "static", "generated")
 

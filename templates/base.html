@@ -51,15 +51,9 @@
           </a>
         </li>
         <li class="nav-item">
-          <a class="nav-link {% if request.endpoint and 'cartoon' in request.endpoint %}fw-semibold{% endif %}"
-             href="{{ url_for('cartoons_list') }}">
-            <i class="bi bi-film me-1"></i>Мультики
-          </a>
-        </li>
-        <li class="nav-item">
           <a class="nav-link {% if request.endpoint in ('templates4_list', 'template4_detail', 'create_template4_scene', 'generate_template4_scene') %}fw-semibold{% endif %}"
              href="{{ url_for('templates4_list') }}">
-            <i class="bi bi-collection-fill me-1"></i>Проекты
+            <i class="bi bi-film me-1"></i>Проекты
           </a>
         </li>
       </ul>
