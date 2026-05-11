@@ -7067,6 +7067,24 @@ def create_app():
             return jsonify({"ok": False, "message": str(exc)}), 400
 
     @app.route("/templates4")
+    def templates4_legacy_root():
+        return redirect(url_for("templates4_list"), code=301)
+
+    @app.route("/templates4/<path:legacy_path>", methods=["GET", "POST"])
+    def templates4_legacy_path(legacy_path):
+        code = 307 if request.method == "POST" else 301
+        return redirect(f"/projects/{legacy_path}", code=code)
+
+    @app.route("/api/templates4/check-access")
+    def api_templates4_check_access_legacy():
+        return redirect("/api/projects/check-access", code=301)
+
+    @app.route("/api/templates4/<path:legacy_path>", methods=["GET", "POST"])
+    def api_templates4_legacy_path(legacy_path):
+        code = 307 if request.method == "POST" else 301
+        return redirect(f"/api/projects/{legacy_path}", code=code)
+
+    @app.route("/projects")
     def templates4_list():
         current_user = get_current_user()
         root = templates4_root_dir()
@@ -7088,7 +7106,7 @@ def create_app():
                 )
         return render_template("templates4_list.html", template_dirs=template_dirs)
 
-    @app.route("/templates4/create", methods=["POST"])
+    @app.route("/projects/create", methods=["POST"])
     def create_template4_project():
         current_user = get_current_user()
         root = templates4_root_dir()
@@ -7126,7 +7144,7 @@ def create_app():
         flash(f"Проект «{project_name}» создан.", "success")
         return redirect(url_for("template4_detail", template_name=project_name))
 
-    @app.route("/templates4/<template_name>/delete", methods=["POST"])
+    @app.route("/projects/<template_name>/delete", methods=["POST"])
     def delete_template4_project(template_name):
         current_user = get_current_user()
         template_dir = require_template4_access(template_name)
@@ -7139,7 +7157,7 @@ def create_app():
             flash(f"Не удалось удалить проект: {exc}", "danger")
         return redirect(url_for("templates4_list"))
 
-    @app.route("/templates4/<template_name>/share", methods=["POST"])
+    @app.route("/projects/<template_name>/share", methods=["POST"])
     def share_template4_project(template_name):
         template_dir = require_template4_access(template_name, manage=True)
         current_user = get_current_user()
@@ -7165,7 +7183,7 @@ def create_app():
         flash(f"Доступ к проекту выдан пользователю {target_user.email}.", "success")
         return redirect(url_for("template4_detail", template_name=template_name))
 
-    @app.route("/templates4/<template_name>/share/<int:user_id>/delete", methods=["POST"])
+    @app.route("/projects/<template_name>/share/<int:user_id>/delete", methods=["POST"])
     def unshare_template4_project(template_name, user_id):
         template_dir = require_template4_access(template_name, manage=True)
         current_user = get_current_user()
@@ -7178,7 +7196,7 @@ def create_app():
         flash("Доступ к проекту отозван.", "success")
         return redirect(url_for("template4_detail", template_name=template_name))
 
-    @app.route("/templates4/<template_name>")
+    @app.route("/projects/<template_name>")
     def template4_detail(template_name):
         current_user = get_current_user()
         template_dir = require_template4_access(template_name)
@@ -7310,7 +7328,7 @@ def create_app():
             project_assembly_message=str(project_meta.get("assembly_message") or "").strip(),
         )
 
-    @app.route("/templates4/<template_name>/scene", methods=["POST"])
+    @app.route("/projects/<template_name>/scene", methods=["POST"])
     def create_template4_scene(template_name):
         template_dir = require_template4_access(template_name, manage=True)
         image_file = request.files.get("scene_image")
@@ -7375,7 +7393,7 @@ def create_app():
         flash("Сцена создана.", "success")
         return redirect(url_for("template4_detail", template_name=template_name))
 
-    @app.route("/templates4/<template_name>/scenes/<scene_id>/steps", methods=["POST"])
+    @app.route("/projects/<template_name>/scenes/<scene_id>/steps", methods=["POST"])
     def create_template4_scene_step(template_name, scene_id):
         template_dir = require_template4_access(template_name, manage=True)
         step_type = (request.form.get("step_type") or "").strip()
@@ -7454,7 +7472,7 @@ def create_app():
         flash("Шаг добавлен.", "success")
         return redirect(url_for("template4_detail", template_name=template_name))
 
-    @app.route("/templates4/<template_name>/scenes/<scene_id>/steps/<step_id>/edit", methods=["POST"])
+    @app.route("/projects/<template_name>/scenes/<scene_id>/steps/<step_id>/edit", methods=["POST"])
     def edit_template4_scene_step(template_name, scene_id, step_id):
         try:
             template_dir = require_template4_access(template_name, manage=True)
@@ -7526,7 +7544,7 @@ def create_app():
             flash(f"Не удалось сохранить шаг: {exc}", "danger")
             return redirect(url_for("template4_detail", template_name=template_name))
 
-    @app.route("/templates4/<template_name>/scenes/<scene_id>/steps/<step_id>/run", methods=["POST"])
+    @app.route("/projects/<template_name>/scenes/<scene_id>/steps/<step_id>/run", methods=["POST"])
     def run_template4_scene_step_route(template_name, scene_id, step_id):
         require_template4_access(template_name, manage=True)
         ok, message = queue_template4_step_run(template_name, scene_id, step_id)
@@ -7650,7 +7668,7 @@ def create_app():
         )
         return True, "Шаг обновлен."
 
-    @app.route("/templates4/<template_name>/scenes/<scene_id>/steps/<step_id>/delete", methods=["POST"])
+    @app.route("/projects/<template_name>/scenes/<scene_id>/steps/<step_id>/delete", methods=["POST"])
     def delete_template4_scene_step(template_name, scene_id, step_id):
         template_dir = require_template4_access(template_name, manage=True)
         scenes, scene, step = get_scene_and_step(template_dir, scene_id, step_id)
@@ -7679,7 +7697,7 @@ def create_app():
         flash("Шаг удален.", "success")
         return redirect(url_for("template4_detail", template_name=template_name))
 
-    @app.route("/templates4/<template_name>/scenes/<scene_id>/steps/<step_id>/move", methods=["POST"])
+    @app.route("/projects/<template_name>/scenes/<scene_id>/steps/<step_id>/move", methods=["POST"])
     def move_template4_scene_step(template_name, scene_id, step_id):
         template_dir = require_template4_access(template_name, manage=True)
         direction = (request.form.get("direction") or "").strip().lower()
@@ -7704,7 +7722,7 @@ def create_app():
         save_template4_scenes(template_dir, scenes)
         return redirect(url_for("template4_detail", template_name=template_name))
 
-    @app.route("/templates4/<template_name>/assemble", methods=["POST"])
+    @app.route("/projects/<template_name>/assemble", methods=["POST"])
     def assemble_template4_project_video(template_name):
         require_template4_access(template_name, manage=True)
         ok, message, _url = assemble_template4_project_video_job(template_name)
@@ -7765,7 +7783,7 @@ def create_app():
         update_template4_project_state(template_dir, status="completed", message="Итоговое видео проекта собрано.", output_url=output_url)
         return True, "Итоговое видео проекта собрано.", output_url
 
-    @app.route("/templates4/<template_name>/generate", methods=["POST"])
+    @app.route("/projects/<template_name>/generate", methods=["POST"])
     def generate_template4_scene(template_name):
         template_dir = require_template4_access(template_name, manage=True)
         scene_id = (request.form.get("scene_id") or "").strip()
@@ -7809,7 +7827,7 @@ def create_app():
         flash("Генерация сцены запущена.", "success")
         return redirect(url_for("template4_detail", template_name=template_name))
 
-    @app.route("/templates4/<template_name>/regenerate", methods=["POST"])
+    @app.route("/projects/<template_name>/regenerate", methods=["POST"])
     def regenerate_template4_scene(template_name):
         template_dir = require_template4_access(template_name, manage=True)
         scene_id = (request.form.get("scene_id") or "").strip()
@@ -7857,12 +7875,12 @@ def create_app():
         flash("Перегенерация сцены запущена.", "success")
         return redirect(url_for("template4_detail", template_name=template_name))
 
-    @app.route("/api/templates4/<template_name>/scenes")
+    @app.route("/api/projects/<template_name>/scenes")
     def api_template4_scenes(template_name):
         template_dir = require_template4_access(template_name)
         return jsonify({"ok": True, "scenes": load_template4_scenes(template_dir)})
 
-    @app.route("/api/templates4/check-access")
+    @app.route("/api/projects/check-access")
     def api_templates4_check_access():
         model_name = (app.config.get("KLING_MODEL") or "").strip() or "kling-v2.6-std"
         has_jwt_keys = (app.config.get("KLING_ACCESS_KEY") or "").strip() and (app.config.get("KLING_SECRET_KEY") or "").strip()

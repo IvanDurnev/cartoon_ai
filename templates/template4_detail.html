@@ -695,7 +695,7 @@
       accessResult.className = 'alert alert-info py-2 px-3';
       accessResult.textContent = 'Проверяю доступ к KLING API...';
       try {
-        const resp = await fetch('/api/templates4/check-access', { headers: { Accept: 'application/json' } });
+        const resp = await fetch('/api/projects/check-access', { headers: { Accept: 'application/json' } });
         const data = await resp.json();
         accessResult.className = `alert ${data.ok ? 'alert-success' : 'alert-danger'} py-2 px-3`;
         accessResult.textContent = data.message || (data.ok ? 'OK' : 'Ошибка');
