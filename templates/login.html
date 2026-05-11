@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Вход — Cartoon AI{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-12 col-md-6 col-lg-4">
+    <div class="card">
+      <div class="card-header bg-white py-3">
+        <h4 class="mb-0">Вход в систему</h4>
+      </div>
+      <div class="card-body">
+        <form method="POST" action="{{ url_for('login') }}">
+          <input type="hidden" name="next" value="{{ next_url or '' }}">
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Email</label>
+            <input type="email" name="email" class="form-control" required autocomplete="username">
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Пароль</label>
+            <input type="password" name="password" class="form-control" required autocomplete="current-password">
+          </div>
+          <button type="submit" class="btn btn-primary w-100">Войти</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

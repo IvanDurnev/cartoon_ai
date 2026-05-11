@@ -1,7 +1,19 @@
 from datetime import datetime
+
 from extensions import db
 
 
+class User(db.Model):
+    __tablename__ = "users"
+
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    password_hash = db.Column(db.String(255), nullable=False)
+    is_admin = db.Column(db.Boolean, default=False, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    children = db.relationship("Child", backref="creator", lazy=True)
+    cartoons = db.relationship("Cartoon", backref="creator", lazy=True)
 
 
 class Child(db.Model):
@@ -11,6 +23,7 @@ class Child(db.Model):
     name = db.Column(db.String(100), nullable=False)
     photo_filename = db.Column(db.String(255), nullable=False)
     voice_id = db.Column(db.String(120), nullable=True)  # ElevenLabs voice id
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     avatars = db.relationship(
@@ -42,10 +55,10 @@ class CartoonAvatar(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False)
-    task_id = db.Column(db.String(100))          # задача в aivideoapi
+    task_id = db.Column(db.String(100))  # задача в aivideoapi
     status = db.Column(db.String(20), default="pending")  # pending | completed | failed
-    image_url = db.Column(db.String(500))         # URL готового изображения
-    style_name = db.Column(db.String(50))         # Disney / Pixar / Аниме
+    image_url = db.Column(db.String(500))  # URL готового изображения
+    style_name = db.Column(db.String(50))  # Disney / Pixar / Аниме
     is_selected = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -67,17 +80,20 @@ class Cartoon(db.Model):
     title = db.Column(db.String(200))
     story_prompt = db.Column(db.Text, nullable=False)
     status = db.Column(db.String(20), default="draft")  # draft | generating | ready | failed
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     scenes = db.relationship(
-        "CartoonScene", backref="cartoon", cascade="all, delete-orphan",
+        "CartoonScene",
+        backref="cartoon",
+        cascade="all, delete-orphan",
         order_by="CartoonScene.scene_number",
     )
     participants = db.relationship(
-        "CartoonParticipant", backref="cartoon", cascade="all, delete-orphan",
+        "CartoonParticipant", backref="cartoon", cascade="all, delete-orphan"
     )
     character_links = db.relationship(
-        "CartoonCharacterLink", backref="cartoon", cascade="all, delete-orphan",
+        "CartoonCharacterLink", backref="cartoon", cascade="all, delete-orphan"
     )
 
     @property
@@ -119,9 +135,9 @@ class CartoonScene(db.Model):
     sound_effects = db.Column(db.String(300))
     facial_expressions = db.Column(db.Text)
     # video generation
-    video_prompt = db.Column(db.Text)           # English prompt for aivideoapi
+    video_prompt = db.Column(db.Text)  # English prompt for aivideoapi
     video_task_id = db.Column(db.String(100))
-    video_status = db.Column(db.String(20))     # pending | completed | failed
+    video_status = db.Column(db.String(20))  # pending | completed | failed
     video_url = db.Column(db.String(500))
 
     def to_dict(self):

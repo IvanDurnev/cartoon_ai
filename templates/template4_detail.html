@@ -18,6 +18,38 @@
   .scene-toggle:hover {
     background: #fcfbff;
   }
+  .media-lazy {
+    position: relative;
+    overflow: hidden;
+    border-radius: 0.5rem;
+    background: #f3f4f6;
+  }
+  .media-skeleton {
+    width: 100%;
+    min-height: 160px;
+    background: linear-gradient(90deg, #edf2f7 25%, #e2e8f0 37%, #edf2f7 63%);
+    background-size: 400% 100%;
+    animation: mediaSkeletonShimmer 1.3s ease infinite;
+  }
+  .media-lazy-sm .media-skeleton {
+    min-height: 88px;
+  }
+  .media-spinner {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.45);
+  }
+  .media-lazy.is-loaded .media-skeleton,
+  .media-lazy.is-loaded .media-spinner {
+    display: none;
+  }
+  @keyframes mediaSkeletonShimmer {
+    0% { background-position: 100% 0; }
+    100% { background-position: 0 0; }
+  }
 </style>
 <div class="mb-4">
   <a href="{{ url_for('templates4_list') }}" class="text-muted text-decoration-none small">
@@ -39,6 +71,7 @@
     </button>
   </div>
 </div>
+<div class="text-muted small mb-3">Создал: {{ project_owner_email or 'админ' }}</div>
 <div id="veo3-access-result" class="alert py-2 px-3 d-none" role="alert"></div>
 <div id="template4-action-result" class="alert py-2 px-3 d-none" role="alert"></div>
 <div id="project-assembly-status"
@@ -46,6 +79,50 @@
      role="alert">
   {{ project_assembly_message or '' }}
 </div>
+
+{% if can_manage_project_shares or shared_users %}
+<div class="card mb-4">
+  <div class="card-header bg-white py-3">
+    <h6 class="mb-0">Доступ к проекту</h6>
+  </div>
+  <div class="card-body">
+    {% if can_manage_project_shares %}
+    <form method="POST" action="{{ url_for('share_template4_project', template_name=template_name) }}" class="row g-2 align-items-end mb-3">
+      <div class="col-12 col-md-8">
+        <label class="form-label">Выдать доступ пользователю</label>
+        <select name="user_id" class="form-select" required>
+          <option value="">Выберите пользователя</option>
+          {% for user in shareable_users %}
+          <option value="{{ user.id }}">{{ user.email }}{% if user.is_admin %} (admin){% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-12 col-md-4 d-grid">
+        <button type="submit" class="btn btn-primary">Выдать доступ</button>
+      </div>
+    </form>
+    {% endif %}
+
+    {% if shared_users %}
+    <div class="d-flex flex-column gap-2">
+      {% for user in shared_users %}
+      <div class="d-flex align-items-center justify-content-between border rounded p-2">
+        <div>{{ user.email }}{% if user.is_admin %} <span class="badge bg-light text-dark">admin</span>{% endif %}</div>
+        {% if can_manage_project_shares %}
+        <form method="POST" action="{{ url_for('unshare_template4_project', template_name=template_name, user_id=user.id) }}">
+          <button type="submit" class="btn btn-outline-danger btn-sm">Отозвать</button>
+        </form>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="text-muted small">Кроме владельца доступ пока никому не выдан.</div>
+    {% endif %}
+    <div class="form-text mt-3">При выдаче доступа к проекту пользователь автоматически видит детей, которые участвуют в этом проекте.</div>
+  </div>
+</div>
+{% endif %}
 
 <div class="modal fade" id="create-scene-modal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-centered">
@@ -124,20 +201,38 @@
       </div>
 
       <div class="collapse" id="scene-collapse-{{ scene.id }}">
-        {% if scene.image_ref %}
-        <img src="{{ url_for('static', filename='templates4/' + template_name + '/' + scene.image_ref) }}" class="img-fluid rounded mb-3" style="max-height:260px;object-fit:cover;">
-        {% endif %}
+        {% if scene.image_ref or scene.audio_ref %}
+        <div class="row g-3 align-items-center mb-3">
+          {% if scene.image_ref %}
+          <div class="col-12 {% if scene.audio_ref %}col-lg-7{% endif %}">
+            <div class="media-lazy" data-lazy-kind="img">
+              <div class="media-skeleton" style="min-height:220px;"></div>
+              <div class="media-spinner"><span class="spinner-border spinner-border-sm text-secondary"></span></div>
+              <img data-src="{{ url_for('static', filename='templates4/' + template_name + '/' + scene.image_ref) }}" class="img-fluid rounded w-100" style="max-height:260px;object-fit:contain;background:#f8fafc;" alt="Кадр сцены">
+            </div>
+          </div>
+          {% endif %}
 
-        {% if scene.audio_ref %}
-        <audio controls class="w-100 mb-3">
-          <source src="{{ url_for('static', filename='templates4/' + template_name + '/' + scene.audio_ref) }}">
-        </audio>
+          {% if scene.audio_ref %}
+          <div class="col-12 {% if scene.image_ref %}col-lg-5{% endif %}">
+            <div class="media-lazy" data-lazy-kind="audio">
+              <div class="media-skeleton" style="min-height:56px;"></div>
+              <div class="media-spinner"><span class="spinner-border spinner-border-sm text-secondary"></span></div>
+              <audio controls class="w-100">
+                <source data-src="{{ url_for('static', filename='templates4/' + template_name + '/' + scene.audio_ref) }}">
+              </audio>
+            </div>
+          </div>
+          {% endif %}
+        </div>
         {% endif %}
 
         {% if scene.video_ref %}
-        <div class="mb-3 rounded overflow-hidden" style="background:#000;">
+        <div class="mb-3 rounded overflow-hidden media-lazy" style="background:#000;" data-lazy-kind="video">
+          <div class="media-skeleton" style="min-height:240px;"></div>
+          <div class="media-spinner"><span class="spinner-border spinner-border-sm text-light"></span></div>
           <video controls preload="metadata" class="w-100" style="max-height:320px;">
-            <source src="{{ url_for('static', filename='templates4/' + template_name + '/' + scene.video_ref) }}">
+            <source data-src="{{ url_for('static', filename='templates4/' + template_name + '/' + scene.video_ref) }}">
           </video>
         </div>
         {% endif %}
@@ -200,17 +295,23 @@
                   <a href="{{ step.output_url or '#' }}" target="_blank" class="small text-decoration-none js-step-output-link">Открыть результат шага</a>
                 </div>
                 {% set out = (step.output_url or '')|lower %}
-                <div class="mt-2 rounded overflow-hidden border p-1 js-step-image-wrap {% if not (out.endswith('.png') or out.endswith('.jpg') or out.endswith('.jpeg') or out.endswith('.webp') or out.endswith('.gif')) %}d-none{% endif %}" style="background:#f8fafc;">
-                  <img src="{{ step.output_url or '' }}" class="w-100 js-step-image" style="max-height:260px;object-fit:contain;" alt="Результат шага">
+                <div class="mt-2 rounded overflow-hidden border p-1 js-step-image-wrap media-lazy {% if not (out.endswith('.png') or out.endswith('.jpg') or out.endswith('.jpeg') or out.endswith('.webp') or out.endswith('.gif')) %}d-none{% endif %}" style="background:#f8fafc;" data-lazy-kind="img">
+                  <div class="media-skeleton" style="min-height:220px;"></div>
+                  <div class="media-spinner"><span class="spinner-border spinner-border-sm text-secondary"></span></div>
+                  <img data-src="{{ step.output_url or '' }}" class="w-100 js-step-image" style="max-height:260px;object-fit:contain;" alt="Результат шага">
                 </div>
-                <div class="mt-2 rounded overflow-hidden js-step-video-wrap {% if not (out.endswith('.mp4') or out.endswith('.mov') or out.endswith('.webm') or out.endswith('.m4v')) %}d-none{% endif %}" style="background:#000;">
+                <div class="mt-2 rounded overflow-hidden js-step-video-wrap media-lazy {% if not (out.endswith('.mp4') or out.endswith('.mov') or out.endswith('.webm') or out.endswith('.m4v')) %}d-none{% endif %}" style="background:#000;" data-lazy-kind="video">
+                  <div class="media-skeleton" style="min-height:240px;"></div>
+                  <div class="media-spinner"><span class="spinner-border spinner-border-sm text-light"></span></div>
                   <video controls preload="metadata" class="w-100 js-step-video" style="max-height:320px;">
-                    <source src="{{ step.output_url or '' }}">
+                    <source data-src="{{ step.output_url or '' }}">
                   </video>
                 </div>
-                <div class="mt-2 js-step-audio-wrap {% if not (out.endswith('.mp3') or out.endswith('.wav') or out.endswith('.ogg') or out.endswith('.m4a') or out.endswith('.aac')) %}d-none{% endif %}">
+                <div class="mt-2 js-step-audio-wrap media-lazy {% if not (out.endswith('.mp3') or out.endswith('.wav') or out.endswith('.ogg') or out.endswith('.m4a') or out.endswith('.aac')) %}d-none{% endif %}" data-lazy-kind="audio">
+                  <div class="media-skeleton" style="min-height:56px;"></div>
+                  <div class="media-spinner"><span class="spinner-border spinner-border-sm text-secondary"></span></div>
                   <audio controls class="w-100 js-step-audio">
-                    <source src="{{ step.output_url or '' }}">
+                    <source data-src="{{ step.output_url or '' }}">
                   </audio>
                 </div>
               </div>
@@ -253,7 +354,11 @@
                                 <input type="radio" name="step_child_avatar_id" value="{{ a.avatar_id }}" class="form-check-input me-1" {% if (step.child_avatar_id|string) == (a.avatar_id|string) %}checked{% endif %}>
                                 <span class="small">{{ a.child_name }}</span>
                                 {% if a.image_url %}
-                                <img src="{{ a.image_url }}" class="w-100 rounded mt-1" style="max-height:110px;object-fit:cover;">
+                                <div class="media-lazy media-lazy-sm mt-1" data-lazy-kind="img">
+                                  <div class="media-skeleton"></div>
+                                  <div class="media-spinner"><span class="spinner-border spinner-border-sm text-secondary"></span></div>
+                                  <img data-src="{{ a.image_url }}" class="w-100 rounded" style="max-height:110px;object-fit:cover;" alt="{{ a.child_name }}">
+                                </div>
                                 {% endif %}
                               </label>
                             </div>
@@ -268,7 +373,11 @@
                               <label class="border rounded p-2 d-block h-100" style="cursor:pointer;">
                                 <input type="radio" name="step_source_image_ref" value="{{ c.ref }}" class="form-check-input me-1" {% if (step.source_image_ref or '') == c.ref %}checked{% endif %}>
                                 <span class="small">{{ c.label }}</span>
-                                <img src="{{ c.url }}" class="w-100 rounded mt-1" style="max-height:110px;object-fit:cover;">
+                                <div class="media-lazy media-lazy-sm mt-1" data-lazy-kind="img">
+                                  <div class="media-skeleton"></div>
+                                  <div class="media-spinner"><span class="spinner-border spinner-border-sm text-secondary"></span></div>
+                                  <img data-src="{{ c.url }}" class="w-100 rounded" style="max-height:110px;object-fit:cover;" alt="{{ c.label }}">
+                                </div>
                               </label>
                             </div>
                             {% endfor %}
@@ -355,7 +464,11 @@
                           <input type="radio" name="step_child_avatar_id" value="{{ a.avatar_id }}" class="form-check-input me-1">
                           <span class="small">{{ a.child_name }}</span>
                           {% if a.image_url %}
-                          <img src="{{ a.image_url }}" class="w-100 rounded mt-1" style="max-height:110px;object-fit:cover;">
+                          <div class="media-lazy media-lazy-sm mt-1" data-lazy-kind="img">
+                            <div class="media-skeleton"></div>
+                            <div class="media-spinner"><span class="spinner-border spinner-border-sm text-secondary"></span></div>
+                            <img data-src="{{ a.image_url }}" class="w-100 rounded" style="max-height:110px;object-fit:cover;" alt="{{ a.child_name }}">
+                          </div>
                           {% endif %}
                         </label>
                       </div>
@@ -370,7 +483,11 @@
                         <label class="border rounded p-2 d-block h-100" style="cursor:pointer;">
                           <input type="radio" name="step_source_image_ref" value="{{ c.ref }}" class="form-check-input me-1">
                           <span class="small">{{ c.label }}</span>
-                          <img src="{{ c.url }}" class="w-100 rounded mt-1" style="max-height:110px;object-fit:cover;">
+                          <div class="media-lazy media-lazy-sm mt-1" data-lazy-kind="img">
+                            <div class="media-skeleton"></div>
+                            <div class="media-spinner"><span class="spinner-border spinner-border-sm text-secondary"></span></div>
+                            <img data-src="{{ c.url }}" class="w-100 rounded" style="max-height:110px;object-fit:cover;" alt="{{ c.label }}">
+                          </div>
                         </label>
                       </div>
                       {% endfor %}
@@ -423,9 +540,11 @@
 <div class="card mt-4 {% if not final_project_video_url %}d-none{% endif %}" id="final-project-video-card">
   <div class="card-body">
     <div class="fw-semibold mb-3">Итоговое видео проекта</div>
-    <div class="rounded overflow-hidden" style="background:#000;">
+    <div class="rounded overflow-hidden media-lazy" style="background:#000;" data-lazy-kind="video">
+      <div class="media-skeleton" style="min-height:320px;"></div>
+      <div class="media-spinner"><span class="spinner-border spinner-border-sm text-light"></span></div>
       <video controls preload="metadata" class="w-100" style="max-height:520px;" id="final-project-video">
-        <source src="{{ final_project_video_url or '' }}">
+        <source data-src="{{ final_project_video_url or '' }}">
       </video>
     </div>
   </div>
@@ -446,6 +565,74 @@
   const finalProjectVideoCard = document.getElementById('final-project-video-card');
   const finalProjectVideo = document.getElementById('final-project-video');
   const pendingEditModalByStep = {};
+
+  function markMediaLoaded(mediaEl) {
+    const wrap = mediaEl.closest('.media-lazy');
+    if (wrap) wrap.classList.add('is-loaded');
+  }
+
+  function primeMediaElement(mediaEl) {
+    if (!mediaEl) return;
+    if (mediaEl.tagName === 'IMG') {
+      const src = mediaEl.getAttribute('data-src') || '';
+      if (!src) return;
+      mediaEl.addEventListener('load', () => markMediaLoaded(mediaEl), { once: true });
+      mediaEl.addEventListener('error', () => markMediaLoaded(mediaEl), { once: true });
+      mediaEl.setAttribute('src', src);
+      return;
+    }
+    if (mediaEl.tagName === 'VIDEO' || mediaEl.tagName === 'AUDIO') {
+      const sourceEl = mediaEl.querySelector('source');
+      if (!sourceEl) {
+        markMediaLoaded(mediaEl);
+        return;
+      }
+      const src = sourceEl.getAttribute('data-src') || '';
+      if (!src) {
+        markMediaLoaded(mediaEl);
+        return;
+      }
+      const onReady = () => markMediaLoaded(mediaEl);
+      mediaEl.addEventListener('loadeddata', onReady, { once: true });
+      mediaEl.addEventListener('canplay', onReady, { once: true });
+      mediaEl.addEventListener('error', onReady, { once: true });
+      sourceEl.setAttribute('src', src);
+      mediaEl.load();
+    }
+  }
+
+  function initLazyMedia() {
+    const lazyNodes = Array.from(document.querySelectorAll('[data-lazy-kind]'));
+    if (!lazyNodes.length) return;
+    const observer = 'IntersectionObserver' in window
+      ? new IntersectionObserver((entries, io) => {
+          entries.forEach((entry) => {
+            if (!entry.isIntersecting) return;
+            const wrap = entry.target;
+            if (wrap.dataset.lazyDone === '1') {
+              io.unobserve(wrap);
+              return;
+            }
+            const mediaEl = wrap.querySelector('img,video,audio');
+            if (mediaEl) {
+              primeMediaElement(mediaEl);
+              wrap.dataset.lazyDone = '1';
+            }
+            io.unobserve(wrap);
+          });
+        }, { rootMargin: '220px 0px' })
+      : null;
+    lazyNodes.forEach((wrap) => {
+      if (observer) {
+        observer.observe(wrap);
+      } else {
+        const mediaEl = wrap.querySelector('img,video,audio');
+        if (mediaEl) primeMediaElement(mediaEl);
+      }
+    });
+  }
+
+  initLazyMedia();
 
   function applyProjectState(projectState) {
     const state = projectState || {};
@@ -494,6 +681,8 @@
           src.setAttribute('src', mediaUrl);
         }
         if (needsReload) {
+          finalProjectVideo.addEventListener('loadeddata', () => markMediaLoaded(finalProjectVideo), { once: true });
+          finalProjectVideo.addEventListener('error', () => markMediaLoaded(finalProjectVideo), { once: true });
           finalProjectVideo.setAttribute('src', mediaUrl);
           finalProjectVideo.load();
         }
@@ -585,6 +774,8 @@
       if (audioWrap) audioWrap.classList.toggle('d-none', !isAudio);
 
       if (isImage && imageEl && imageEl.getAttribute('src') !== mediaUrl) {
+        imageEl.addEventListener('load', () => markMediaLoaded(imageEl), { once: true });
+        imageEl.addEventListener('error', () => markMediaLoaded(imageEl), { once: true });
         imageEl.setAttribute('src', mediaUrl);
       }
       if (isVideo && videoEl) {
@@ -594,6 +785,8 @@
           src.setAttribute('src', mediaUrl);
         }
         if (needsReload) {
+          videoEl.addEventListener('loadeddata', () => markMediaLoaded(videoEl), { once: true });
+          videoEl.addEventListener('error', () => markMediaLoaded(videoEl), { once: true });
           videoEl.setAttribute('src', mediaUrl);
           videoEl.load();
         }
@@ -605,6 +798,8 @@
           src.setAttribute('src', mediaUrl);
         }
         if (needsReload) {
+          audioEl.addEventListener('loadeddata', () => markMediaLoaded(audioEl), { once: true });
+          audioEl.addEventListener('error', () => markMediaLoaded(audioEl), { once: true });
           audioEl.setAttribute('src', mediaUrl);
           audioEl.load();
         }

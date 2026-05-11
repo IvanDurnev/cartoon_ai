@@ -16,29 +16,38 @@
     <div class="flex-grow-1">
       <h3 class="mb-1">{{ child.name }}</h3>
       <div class="text-muted small">Добавлен {{ child.created_at.strftime('%d.%m.%Y') }}</div>
+      {% if current_user.is_admin and creator_email %}
+      <div class="text-muted small">Создал: {{ creator_email }}</div>
+      {% endif %}
     </div>
     <div class="d-flex gap-2 flex-wrap">
-      {% if not child.has_pending_generation %}
+      {% if can_manage_child and not child.has_pending_generation %}
         <form method="POST" action="{{ url_for('generate_avatars', child_id=child.id) }}">
           <button type="submit" class="btn btn-primary">
             <i class="bi bi-magic me-1"></i>
             {% if child.avatars %}Перегенерировать{% else %}Создать мульт-аватар{% endif %}
           </button>
         </form>
-      {% else %}
+      {% elif can_manage_child %}
         <button class="btn btn-secondary" disabled id="gen-btn">
           <span class="spinner-border spinner-border-sm me-1"></span> Генерация…
         </button>
       {% endif %}
+      {% if can_manage_child %}
       <form method="POST" action="{{ url_for('delete_child', child_id=child.id) }}"
             onsubmit="return confirm('Удалить ребёнка и все аватары?')">
         <button type="submit" class="btn btn-outline-danger">
           <i class="bi bi-trash"></i>
         </button>
       </form>
+      {% endif %}
     </div>
   </div>
 </div>
+
+{% if not can_manage_child %}
+<div class="alert alert-info">Этот ребёнок доступен вам через проект. Изменение и удаление доступны только владельцу или админу.</div>
+{% endif %}
 
 <div class="card mb-4">
   <div class="card-header bg-white py-3">
@@ -63,7 +72,7 @@
       </div>
       <div class="col-md-3 d-grid">
         <label class="form-label fw-semibold d-none d-md-block">&nbsp;</label>
-        <button type="submit" class="btn btn-primary">
+        <button type="submit" class="btn btn-primary" {% if not can_manage_child %}disabled{% endif %}>
           <i class="bi bi-check-lg me-1"></i>Сохранить
         </button>
       </div>

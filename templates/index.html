@@ -51,6 +51,9 @@
               <img src="{{ url_for('static', filename='uploads/' + child.photo_filename) }}"
                    class="child-photo mx-auto mb-2" alt="{{ child.name }}">
               <div class="fw-semibold text-dark">{{ child.name }}</div>
+              {% if current_user.is_admin and creator_emails.get(child.id) %}
+              <div class="text-muted small mt-1">Создал: {{ creator_emails.get(child.id) }}</div>
+              {% endif %}
               <div class="text-muted small mt-1">
                 {% if child.selected_avatar %}
                   <span class="badge bg-success"><i class="bi bi-check-circle-fill"></i> Аватар выбран</span>

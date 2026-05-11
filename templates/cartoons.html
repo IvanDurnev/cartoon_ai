@@ -24,6 +24,9 @@
               <h6 class="fw-semibold text-dark mb-1 text-truncate">
                 {{ cartoon.title or "Без названия" }}
               </h6>
+              {% if current_user.is_admin and creator_emails.get(cartoon.id) %}
+              <div class="text-muted small mb-1">Создал: {{ creator_emails.get(cartoon.id) }}</div>
+              {% endif %}
               <p class="text-muted small mb-2" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">
                 {{ cartoon.story_prompt }}
               </p>

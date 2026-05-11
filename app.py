@@ -13,6 +13,8 @@ import time
 import shutil
 import hmac
 import hashlib
+from functools import wraps
+import getpass
 from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
 from io import BytesIO
@@ -24,14 +26,15 @@ from elevenlabs.core.api_error import ApiError
 from openai import OpenAI
 from flask import (
     Flask, render_template, request, redirect, url_for,
-    jsonify, flash, abort, Response,
+    jsonify, flash, abort, Response, session,
 )
 from flask_socketio import join_room, leave_room
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from config import Config
 from extensions import db, migrate, socketio
 from models import (
-    Child, CartoonAvatar, Character,
+    User, Child, CartoonAvatar, Character,
     Cartoon, CartoonScene, CartoonParticipant, CartoonCharacterLink,
 )
 
@@ -49,9 +52,95 @@ def create_app():
 
     app.logger.setLevel(logging.INFO)
 
+    def normalize_email(email: str) -> str:
+        return (email or "").strip().lower()
+
+    def get_current_user() -> User | None:
+        user_id = session.get("user_id")
+        if not user_id:
+            return None
+        try:
+            return db.session.get(User, int(user_id))
+        except Exception:
+            return None
+
+    def login_user_session(user: User) -> None:
+        session["user_id"] = int(user.id)
+
+    def logout_user_session() -> None:
+        session.pop("user_id", None)
+
+    def create_user_account(email: str, password: str, *, is_admin: bool) -> User:
+        normalized_email = normalize_email(email)
+        if not normalized_email:
+            raise ValueError("Email не должен быть пустым.")
+        if not password:
+            raise ValueError("Пароль не должен быть пустым.")
+        existing = User.query.filter_by(email=normalized_email).first()
+        if existing:
+            raise ValueError(f"Пользователь с email {normalized_email} уже существует.")
+        user = User(
+            email=normalized_email,
+            password_hash=generate_password_hash(password),
+            is_admin=bool(is_admin),
+        )
+        db.session.add(user)
+        db.session.commit()
+        return user
+
+    def login_required(view_func):
+        @wraps(view_func)
+        def wrapped_view(*args, **kwargs):
+            if get_current_user() is None:
+                flash("Сначала войдите в систему.", "warning")
+                return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
+            return view_func(*args, **kwargs)
+
+        return wrapped_view
+
+    @app.before_request
+    def require_authentication():
+        if request.endpoint in {
+            "login",
+            "static",
+            "api_video_callback",
+            "api_callback",
+        }:
+            return None
+        if request.endpoint and request.endpoint.startswith("socketio."):
+            return None
+        if get_current_user() is None:
+            return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
+        return None
+
     @app.context_processor
     def inject_voice_options():
-        return {"voice_options": app.config.get("ELEVENLABS_PRESET_VOICES", [])}
+        return {
+            "voice_options": app.config.get("ELEVENLABS_PRESET_VOICES", []),
+            "current_user": get_current_user(),
+        }
+
+    @app.cli.command("create-user")
+    def create_user_cli():
+        """Create a regular user account."""
+        email = input("Email: ").strip()
+        password = getpass.getpass("Password: ")
+        try:
+            user = create_user_account(email, password, is_admin=False)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        print(f"Пользователь создан: {user.email} (id={user.id})")
+
+    @app.cli.command("create-admin")
+    def create_admin_cli():
+        """Create an admin account."""
+        email = input("Email: ").strip()
+        password = getpass.getpass("Password: ")
+        try:
+            user = create_user_account(email, password, is_admin=True)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        print(f"Администратор создан: {user.email} (id={user.id})")
 
     # cartoon_id -> runtime pipeline state for UI locking/progress
     pipeline_runtime_state = {}
@@ -220,6 +309,163 @@ def create_app():
         path = template4_project_meta_path(template_dir)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    def template4_shared_user_ids(meta: dict | None) -> list[int]:
+        result: list[int] = []
+        for raw_value in (meta or {}).get("shared_user_ids") or []:
+            try:
+                user_id = int(raw_value)
+            except Exception:
+                continue
+            if user_id not in result:
+                result.append(user_id)
+        return result
+
+    def resolve_template4_owner_user_id(meta: dict | None) -> int | None:
+        try:
+            owner_user_id = int((meta or {}).get("owner_user_id") or 0)
+        except Exception:
+            return None
+        return owner_user_id or None
+
+    def template4_participant_child_ids(template_dir: str) -> set[int]:
+        child_ids: set[int] = set()
+        for scene in load_template4_scenes(template_dir):
+            avatar_ids: list[int] = []
+            for raw_avatar_id in [scene.get("child_avatar_id")] + [
+                (step or {}).get("child_avatar_id")
+                for step in (scene.get("steps") if isinstance(scene.get("steps"), list) else [])
+                if isinstance(step, dict)
+            ]:
+                try:
+                    avatar_id = int(raw_avatar_id or 0)
+                except Exception:
+                    continue
+                if avatar_id > 0:
+                    avatar_ids.append(avatar_id)
+            if not avatar_ids:
+                continue
+            avatars = CartoonAvatar.query.filter(CartoonAvatar.id.in_(avatar_ids)).all()
+            for avatar in avatars:
+                child_ids.add(int(avatar.child_id))
+        return child_ids
+
+    def user_can_view_template4_dir(user: User | None, template_dir: str) -> bool:
+        if not user or not template_dir:
+            return False
+        if user.is_admin:
+            return True
+        meta = load_template4_project_meta(template_dir)
+        owner_user_id = resolve_template4_owner_user_id(meta)
+        if owner_user_id and owner_user_id == user.id:
+            return True
+        return user.id in template4_shared_user_ids(meta)
+
+    def user_can_manage_template4_dir(user: User | None, template_dir: str) -> bool:
+        return user_can_view_template4_dir(user, template_dir)
+
+    def user_can_delete_template4_dir(user: User | None, template_dir: str) -> bool:
+        if not user or not template_dir:
+            return False
+        if user.is_admin:
+            return True
+        meta = load_template4_project_meta(template_dir)
+        owner_user_id = resolve_template4_owner_user_id(meta)
+        return owner_user_id == user.id
+
+    def user_can_manage_template4_shares(user: User | None, template_dir: str) -> bool:
+        if not user or not user.is_admin or not template_dir:
+            return False
+        meta = load_template4_project_meta(template_dir)
+        owner_user_id = resolve_template4_owner_user_id(meta)
+        return owner_user_id in {None, user.id}
+
+    def accessible_child_ids_for_user(user: User | None) -> set[int]:
+        if not user:
+            return set()
+        if user.is_admin:
+            return {child.id for child in Child.query.all()}
+        child_ids = {
+            child.id
+            for child in Child.query.filter_by(created_by_user_id=user.id).all()
+        }
+        root = templates4_root_dir()
+        if os.path.isdir(root):
+            for entry_name in os.listdir(root):
+                template_dir = safe_template4_dir(entry_name)
+                if template_dir and user_can_view_template4_dir(user, template_dir):
+                    child_ids.update(template4_participant_child_ids(template_dir))
+        return child_ids
+
+    def user_can_view_child(user: User | None, child: Child | None) -> bool:
+        if not user or not child:
+            return False
+        if user.is_admin:
+            return True
+        if child.created_by_user_id == user.id:
+            return True
+        return child.id in accessible_child_ids_for_user(user)
+
+    def user_can_manage_child(user: User | None, child: Child | None) -> bool:
+        if not user or not child:
+            return False
+        if user.is_admin:
+            return True
+        return child.created_by_user_id == user.id
+
+    def user_can_view_cartoon(user: User | None, cartoon: Cartoon | None) -> bool:
+        if not user or not cartoon:
+            return False
+        if user.is_admin:
+            return True
+        return cartoon.created_by_user_id == user.id
+
+    def user_can_manage_cartoon(user: User | None, cartoon: Cartoon | None) -> bool:
+        return user_can_view_cartoon(user, cartoon)
+
+    def require_template4_access(template_name: str, *, manage: bool = False) -> str:
+        template_dir = safe_template4_dir(template_name)
+        if not template_dir:
+            abort(404)
+        current_user = get_current_user()
+        allowed = (
+            user_can_manage_template4_dir(current_user, template_dir)
+            if manage
+            else user_can_view_template4_dir(current_user, template_dir)
+        )
+        if not allowed:
+            abort(403)
+        return template_dir
+
+    def require_child_access(child_id: int, *, manage: bool = False) -> Child:
+        child = Child.query.get_or_404(child_id)
+        current_user = get_current_user()
+        allowed = (
+            user_can_manage_child(current_user, child)
+            if manage
+            else user_can_view_child(current_user, child)
+        )
+        if not allowed:
+            abort(403)
+        return child
+
+    def require_cartoon_access(cartoon_id: int, *, manage: bool = False) -> Cartoon:
+        cartoon = Cartoon.query.get_or_404(cartoon_id)
+        current_user = get_current_user()
+        allowed = (
+            user_can_manage_cartoon(current_user, cartoon)
+            if manage
+            else user_can_view_cartoon(current_user, cartoon)
+        )
+        if not allowed:
+            abort(403)
+        return cartoon
+
+    def user_email_by_id(user_id: int | None) -> str:
+        if not user_id:
+            return ""
+        user = db.session.get(User, int(user_id))
+        return (user.email or "").strip() if user else ""
 
     def update_template4_project_state(
         template_dir: str,
@@ -5568,13 +5814,67 @@ def create_app():
 
     # ------------------------------------------------------------------ routes
 
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        if get_current_user() is not None:
+            return redirect(url_for("index"))
+        next_url = (request.args.get("next") or request.form.get("next") or "").strip()
+        if request.method == "POST":
+            email = normalize_email(request.form.get("email", ""))
+            password = request.form.get("password", "")
+            user = User.query.filter_by(email=email).first()
+            if not user or not check_password_hash(user.password_hash, password):
+                flash("Неверный email или пароль.", "danger")
+                return render_template("login.html", next_url=next_url)
+            login_user_session(user)
+            flash("Вы вошли в систему.", "success")
+            if next_url.startswith("/") and not next_url.startswith("//"):
+                return redirect(next_url)
+            return redirect(url_for("index"))
+        return render_template("login.html", next_url=next_url)
+
+    @app.route("/logout", methods=["POST"])
+    @login_required
+    def logout():
+        logout_user_session()
+        flash("Вы вышли из системы.", "info")
+        return redirect(url_for("login"))
+
     @app.route("/")
+    @login_required
     def index():
-        children = Child.query.order_by(Child.created_at.desc()).all()
-        return render_template("index.html", children=children)
+        current_user = get_current_user()
+        accessible_child_ids = accessible_child_ids_for_user(current_user)
+        children_query = Child.query
+        if not current_user.is_admin:
+            if not accessible_child_ids:
+                children = []
+                return render_template(
+                    "index.html",
+                    children=children,
+                    current_user_can_manage_child_ids=set(),
+                    accessible_child_ids=accessible_child_ids,
+                    creator_emails={},
+                )
+            children_query = children_query.filter(Child.id.in_(accessible_child_ids))
+        children = children_query.order_by(Child.created_at.desc()).all()
+        creator_emails = {
+            child.id: user_email_by_id(child.created_by_user_id)
+            for child in children
+        }
+        return render_template(
+            "index.html",
+            children=children,
+            current_user_can_manage_child_ids={
+                child.id for child in children if user_can_manage_child(current_user, child)
+            },
+            accessible_child_ids=accessible_child_ids,
+            creator_emails=creator_emails,
+        )
 
     @app.route("/children/add", methods=["POST"])
     def add_child():
+        current_user = get_current_user()
         name = request.form.get("name", "").strip()
         if not name:
             flash("Введите имя ребёнка.", "danger")
@@ -5594,7 +5894,12 @@ def create_app():
         filename = f"{uuid.uuid4().hex}.{ext}"
         photo.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
 
-        child = Child(name=name, photo_filename=filename, voice_id=voice_id)
+        child = Child(
+            name=name,
+            photo_filename=filename,
+            voice_id=voice_id,
+            created_by_user_id=current_user.id if current_user else None,
+        )
         db.session.add(child)
         db.session.commit()
 
@@ -5603,12 +5908,17 @@ def create_app():
 
     @app.route("/children/<int:child_id>")
     def child_detail(child_id):
-        child = Child.query.get_or_404(child_id)
-        return render_template("child.html", child=child)
+        child = require_child_access(child_id)
+        return render_template(
+            "child.html",
+            child=child,
+            can_manage_child=user_can_manage_child(get_current_user(), child),
+            creator_email=user_email_by_id(child.created_by_user_id),
+        )
 
     @app.route("/children/<int:child_id>/voice", methods=["POST"])
     def update_child_voice(child_id):
-        child = Child.query.get_or_404(child_id)
+        child = require_child_access(child_id, manage=True)
         child.voice_id = request.form.get("voice_id", "").strip() or None
         db.session.commit()
         flash("Голос ребёнка обновлён.", "success")
@@ -5616,7 +5926,7 @@ def create_app():
 
     @app.route("/children/<int:child_id>/generate", methods=["POST"])
     def generate_avatars(child_id):
-        child = Child.query.get_or_404(child_id)
+        child = require_child_access(child_id, manage=True)
 
         if child.has_pending_generation:
             flash("Генерация уже запущена, подождите.", "warning")
@@ -5666,7 +5976,7 @@ def create_app():
 
     @app.route("/children/<int:child_id>/select/<int:avatar_id>", methods=["POST"])
     def select_avatar(child_id, avatar_id):
-        child = Child.query.get_or_404(child_id)
+        child = require_child_access(child_id, manage=True)
 
         for av in child.avatars:
             av.is_selected = False
@@ -5683,7 +5993,7 @@ def create_app():
 
     @app.route("/children/<int:child_id>/delete", methods=["POST"])
     def delete_child(child_id):
-        child = Child.query.get_or_404(child_id)
+        child = require_child_access(child_id, manage=True)
         photo_path = os.path.join(app.config["UPLOAD_FOLDER"], child.photo_filename)
         if os.path.exists(photo_path):
             os.remove(photo_path)
@@ -5780,8 +6090,16 @@ def create_app():
 
     @app.route("/cartoons")
     def cartoons_list():
-        items = Cartoon.query.order_by(Cartoon.created_at.desc()).all()
-        return render_template("cartoons.html", cartoons=items)
+        current_user = get_current_user()
+        items_query = Cartoon.query
+        if not current_user.is_admin:
+            items_query = items_query.filter_by(created_by_user_id=current_user.id)
+        items = items_query.order_by(Cartoon.created_at.desc()).all()
+        creator_emails = {
+            cartoon.id: user_email_by_id(cartoon.created_by_user_id)
+            for cartoon in items
+        }
+        return render_template("cartoons.html", cartoons=items, creator_emails=creator_emails)
 
     # ---------------------------------------------------------------- templates
 
@@ -6750,18 +7068,29 @@ def create_app():
 
     @app.route("/templates4")
     def templates4_list():
+        current_user = get_current_user()
         root = templates4_root_dir()
         template_dirs = []
         if os.path.isdir(root):
             for entry_name in sorted(os.listdir(root), key=lambda name: name.lower()):
-                entry_path = os.path.join(root, entry_name)
-                if not os.path.isdir(entry_path):
+                template_dir = safe_template4_dir(entry_name)
+                if not template_dir or not user_can_view_template4_dir(current_user, template_dir):
                     continue
-                template_dirs.append({"name": entry_name})
+                meta = load_template4_project_meta(template_dir)
+                template_dirs.append(
+                    {
+                        "name": entry_name,
+                        "owner_user_id": resolve_template4_owner_user_id(meta),
+                        "owner_email": user_email_by_id(resolve_template4_owner_user_id(meta)),
+                        "shared_user_ids": template4_shared_user_ids(meta),
+                        "can_delete": user_can_delete_template4_dir(current_user, template_dir),
+                    }
+                )
         return render_template("templates4_list.html", template_dirs=template_dirs)
 
     @app.route("/templates4/create", methods=["POST"])
     def create_template4_project():
+        current_user = get_current_user()
         root = templates4_root_dir()
         os.makedirs(root, exist_ok=True)
         project_name = (request.form.get("project_name") or "").strip()
@@ -6787,14 +7116,22 @@ def create_app():
             return redirect(url_for("templates4_list"))
         os.makedirs(project_dir, exist_ok=True)
         save_template4_scenes(project_dir, [])
+        save_template4_project_meta(
+            project_dir,
+            {
+                "owner_user_id": current_user.id if current_user else None,
+                "shared_user_ids": [],
+            },
+        )
         flash(f"Проект «{project_name}» создан.", "success")
         return redirect(url_for("template4_detail", template_name=project_name))
 
     @app.route("/templates4/<template_name>/delete", methods=["POST"])
     def delete_template4_project(template_name):
-        template_dir = safe_template4_dir(template_name)
-        if not template_dir:
-            abort(404)
+        current_user = get_current_user()
+        template_dir = require_template4_access(template_name)
+        if not user_can_delete_template4_dir(current_user, template_dir):
+            abort(403)
         try:
             shutil.rmtree(template_dir)
             flash(f"Проект «{template_name}» удалён.", "success")
@@ -6802,14 +7139,59 @@ def create_app():
             flash(f"Не удалось удалить проект: {exc}", "danger")
         return redirect(url_for("templates4_list"))
 
+    @app.route("/templates4/<template_name>/share", methods=["POST"])
+    def share_template4_project(template_name):
+        template_dir = require_template4_access(template_name, manage=True)
+        current_user = get_current_user()
+        if not user_can_manage_template4_shares(current_user, template_dir):
+            abort(403)
+        try:
+            target_user_id = int(request.form.get("user_id") or 0)
+        except Exception:
+            target_user_id = 0
+        target_user = db.session.get(User, target_user_id)
+        if not target_user:
+            flash("Пользователь не найден.", "danger")
+            return redirect(url_for("template4_detail", template_name=template_name))
+        meta = load_template4_project_meta(template_dir)
+        shared_user_ids = template4_shared_user_ids(meta)
+        if target_user.id == current_user.id:
+            flash("Нельзя выдать доступ самому себе.", "warning")
+            return redirect(url_for("template4_detail", template_name=template_name))
+        if target_user.id not in shared_user_ids:
+            shared_user_ids.append(target_user.id)
+        meta["shared_user_ids"] = shared_user_ids
+        save_template4_project_meta(template_dir, meta)
+        flash(f"Доступ к проекту выдан пользователю {target_user.email}.", "success")
+        return redirect(url_for("template4_detail", template_name=template_name))
+
+    @app.route("/templates4/<template_name>/share/<int:user_id>/delete", methods=["POST"])
+    def unshare_template4_project(template_name, user_id):
+        template_dir = require_template4_access(template_name, manage=True)
+        current_user = get_current_user()
+        if not user_can_manage_template4_shares(current_user, template_dir):
+            abort(403)
+        meta = load_template4_project_meta(template_dir)
+        shared_user_ids = [value for value in template4_shared_user_ids(meta) if value != user_id]
+        meta["shared_user_ids"] = shared_user_ids
+        save_template4_project_meta(template_dir, meta)
+        flash("Доступ к проекту отозван.", "success")
+        return redirect(url_for("template4_detail", template_name=template_name))
+
     @app.route("/templates4/<template_name>")
     def template4_detail(template_name):
-        template_dir = safe_template4_dir(template_name)
-        if not template_dir:
-            abort(404)
+        current_user = get_current_user()
+        template_dir = require_template4_access(template_name)
         scenes = load_template4_scenes(template_dir)
         avatar_options = []
-        for child in Child.query.order_by(Child.name.asc()).all():
+        accessible_child_ids = accessible_child_ids_for_user(current_user)
+        children_query = Child.query
+        if not current_user.is_admin:
+            if accessible_child_ids:
+                children_query = children_query.filter(Child.id.in_(accessible_child_ids))
+            else:
+                children_query = children_query.filter(Child.id == -1)
+        for child in children_query.order_by(Child.name.asc()).all():
             selected = child.selected_avatar
             if not selected or selected.status != "completed":
                 continue
@@ -6897,6 +7279,17 @@ def create_app():
         if kling_default and kling_default not in kling_models:
             kling_models.insert(0, kling_default)
         project_meta = load_template4_project_meta(template_dir)
+        owner_user_id = resolve_template4_owner_user_id(project_meta)
+        owner_email = user_email_by_id(owner_user_id)
+        shared_users = [
+            user for user in [db.session.get(User, user_id) for user_id in template4_shared_user_ids(project_meta)]
+            if user is not None
+        ]
+        shareable_users = (
+            User.query.filter(User.id != current_user.id).order_by(User.email.asc()).all()
+            if user_can_manage_template4_shares(current_user, template_dir)
+            else []
+        )
         final_project_video_url = str(project_meta.get("final_project_video_url") or "").strip() or latest_template4_project_video_url(template_name, template_dir)
         return render_template(
             "template4_detail.html",
@@ -6909,15 +7302,17 @@ def create_app():
             kling_models=kling_models,
             max_video_seconds=int(app.config.get("TEMPLATE4_MAX_VIDEO_SECONDS", 10)),
             final_project_video_url=final_project_video_url,
+            project_owner_email=owner_email,
+            can_manage_project_shares=user_can_manage_template4_shares(current_user, template_dir),
+            shared_users=shared_users,
+            shareable_users=shareable_users,
             project_assembly_status=str(project_meta.get("assembly_status") or "").strip(),
             project_assembly_message=str(project_meta.get("assembly_message") or "").strip(),
         )
 
     @app.route("/templates4/<template_name>/scene", methods=["POST"])
     def create_template4_scene(template_name):
-        template_dir = safe_template4_dir(template_name)
-        if not template_dir:
-            abort(404)
+        template_dir = require_template4_access(template_name, manage=True)
         image_file = request.files.get("scene_image")
         audio_file = request.files.get("scene_audio")
         video_file = request.files.get("scene_video")
@@ -6982,9 +7377,7 @@ def create_app():
 
     @app.route("/templates4/<template_name>/scenes/<scene_id>/steps", methods=["POST"])
     def create_template4_scene_step(template_name, scene_id):
-        template_dir = safe_template4_dir(template_name)
-        if not template_dir:
-            abort(404)
+        template_dir = require_template4_access(template_name, manage=True)
         step_type = (request.form.get("step_type") or "").strip()
         step_prompt = (request.form.get("step_prompt") or "").strip()
         child_avatar_id_raw = (request.form.get("step_child_avatar_id") or "").strip()
@@ -7009,8 +7402,14 @@ def create_app():
             try:
                 child_avatar_id = int(child_avatar_id_raw)
                 avatar = CartoonAvatar.query.get(child_avatar_id)
-                if avatar and avatar.status == "completed":
+                if (
+                    avatar
+                    and avatar.status == "completed"
+                    and user_can_view_child(get_current_user(), avatar.child)
+                ):
                     avatar_url = (avatar.image_url or "").strip()
+                else:
+                    child_avatar_id = None
             except Exception:
                 child_avatar_id = None
         if step_type in {"add_avatar_to_first_frame", "edit_first_frame"} and not source_image_ref:
@@ -7058,9 +7457,7 @@ def create_app():
     @app.route("/templates4/<template_name>/scenes/<scene_id>/steps/<step_id>/edit", methods=["POST"])
     def edit_template4_scene_step(template_name, scene_id, step_id):
         try:
-            template_dir = safe_template4_dir(template_name)
-            if not template_dir:
-                abort(404)
+            template_dir = require_template4_access(template_name, manage=True)
             step_type = (request.form.get("step_type") or "").strip()
             step_prompt = (request.form.get("step_prompt") or "").strip()
             child_avatar_id_raw = (request.form.get("step_child_avatar_id") or "").strip()
@@ -7084,8 +7481,14 @@ def create_app():
                 try:
                     child_avatar_id = int(child_avatar_id_raw)
                     avatar = CartoonAvatar.query.get(child_avatar_id)
-                    if avatar and avatar.status == "completed":
+                    if (
+                        avatar
+                        and avatar.status == "completed"
+                        and user_can_view_child(get_current_user(), avatar.child)
+                    ):
                         avatar_url = (avatar.image_url or "").strip()
+                    else:
+                        child_avatar_id = None
                 except Exception:
                     child_avatar_id = None
             if step_type in {"add_avatar_to_first_frame", "edit_first_frame"} and not source_image_ref:
@@ -7125,6 +7528,7 @@ def create_app():
 
     @app.route("/templates4/<template_name>/scenes/<scene_id>/steps/<step_id>/run", methods=["POST"])
     def run_template4_scene_step_route(template_name, scene_id, step_id):
+        require_template4_access(template_name, manage=True)
         ok, message = queue_template4_step_run(template_name, scene_id, step_id)
         if ok:
             flash(message, "success")
@@ -7133,9 +7537,7 @@ def create_app():
         return redirect(url_for("template4_detail", template_name=template_name))
 
     def queue_template4_step_run(template_name: str, scene_id: str, step_id: str) -> tuple[bool, str]:
-        template_dir = safe_template4_dir(template_name)
-        if not template_dir:
-            return False, "Шаблон не найден."
+        template_dir = require_template4_access(template_name, manage=True)
         scenes, scene, step = get_scene_and_step(template_dir, scene_id, step_id)
         if not scene or not step:
             return False, "Шаг/сцена не найдены."
@@ -7181,9 +7583,7 @@ def create_app():
         source_audio_ref: str,
         step_model: str,
     ) -> tuple[bool, str]:
-        template_dir = safe_template4_dir(template_name)
-        if not template_dir:
-            return False, "Шаблон не найден."
+        template_dir = require_template4_access(template_name, manage=True)
         scenes, scene, step = get_scene_and_step(template_dir, scene_id, step_id)
         if not scene or not step:
             return False, "Шаг/сцена не найдены."
@@ -7195,8 +7595,14 @@ def create_app():
             try:
                 child_avatar_id = int(child_avatar_id_raw)
                 avatar = CartoonAvatar.query.get(child_avatar_id)
-                if avatar and avatar.status == "completed":
+                if (
+                    avatar
+                    and avatar.status == "completed"
+                    and user_can_view_child(get_current_user(), avatar.child)
+                ):
                     avatar_url = (avatar.image_url or "").strip()
+                else:
+                    child_avatar_id = None
             except Exception:
                 child_avatar_id = None
         if step_type in {"add_avatar_to_first_frame", "edit_first_frame"} and not source_image_ref:
@@ -7246,9 +7652,7 @@ def create_app():
 
     @app.route("/templates4/<template_name>/scenes/<scene_id>/steps/<step_id>/delete", methods=["POST"])
     def delete_template4_scene_step(template_name, scene_id, step_id):
-        template_dir = safe_template4_dir(template_name)
-        if not template_dir:
-            abort(404)
+        template_dir = require_template4_access(template_name, manage=True)
         scenes, scene, step = get_scene_and_step(template_dir, scene_id, step_id)
         if not scene:
             flash("Сцена не найдена.", "danger")
@@ -7277,9 +7681,7 @@ def create_app():
 
     @app.route("/templates4/<template_name>/scenes/<scene_id>/steps/<step_id>/move", methods=["POST"])
     def move_template4_scene_step(template_name, scene_id, step_id):
-        template_dir = safe_template4_dir(template_name)
-        if not template_dir:
-            abort(404)
+        template_dir = require_template4_access(template_name, manage=True)
         direction = (request.form.get("direction") or "").strip().lower()
         if direction not in {"up", "down"}:
             flash("Некорректное направление перемещения.", "danger")
@@ -7304,6 +7706,7 @@ def create_app():
 
     @app.route("/templates4/<template_name>/assemble", methods=["POST"])
     def assemble_template4_project_video(template_name):
+        require_template4_access(template_name, manage=True)
         ok, message, _url = assemble_template4_project_video_job(template_name)
         flash(message, "success" if ok else "danger")
         return redirect(url_for("template4_detail", template_name=template_name))
@@ -7364,9 +7767,7 @@ def create_app():
 
     @app.route("/templates4/<template_name>/generate", methods=["POST"])
     def generate_template4_scene(template_name):
-        template_dir = safe_template4_dir(template_name)
-        if not template_dir:
-            abort(404)
+        template_dir = require_template4_access(template_name, manage=True)
         scene_id = (request.form.get("scene_id") or "").strip()
         if not scene_id:
             flash("Не передан идентификатор сцены.", "danger")
@@ -7410,9 +7811,7 @@ def create_app():
 
     @app.route("/templates4/<template_name>/regenerate", methods=["POST"])
     def regenerate_template4_scene(template_name):
-        template_dir = safe_template4_dir(template_name)
-        if not template_dir:
-            abort(404)
+        template_dir = require_template4_access(template_name, manage=True)
         scene_id = (request.form.get("scene_id") or "").strip()
         if not scene_id:
             flash("Не передан идентификатор сцены.", "danger")
@@ -7460,9 +7859,7 @@ def create_app():
 
     @app.route("/api/templates4/<template_name>/scenes")
     def api_template4_scenes(template_name):
-        template_dir = safe_template4_dir(template_name)
-        if not template_dir:
-            return jsonify({"ok": False, "error": "template not found"}), 404
+        template_dir = require_template4_access(template_name)
         return jsonify({"ok": True, "scenes": load_template4_scenes(template_dir)})
 
     @app.route("/api/templates4/check-access")
@@ -7511,8 +7908,17 @@ def create_app():
 
     @app.route("/cartoons/create", methods=["GET", "POST"])
     def create_cartoon():
+        current_user = get_current_user()
         if request.method == "GET":
-            children = Child.query.order_by(Child.created_at.desc()).all()
+            accessible_child_ids = accessible_child_ids_for_user(current_user)
+            children_query = Child.query
+            if not current_user.is_admin:
+                if not accessible_child_ids:
+                    children = []
+                else:
+                    children = children_query.filter(Child.id.in_(accessible_child_ids)).order_by(Child.created_at.desc()).all()
+            else:
+                children = children_query.order_by(Child.created_at.desc()).all()
             characters = Character.query.order_by(Character.created_at.desc()).all()
             return render_template("cartoon_create.html", children=children, characters=characters)
 
@@ -7526,9 +7932,15 @@ def create_app():
             return redirect(url_for("create_cartoon"))
 
         child_ids = [int(x) for x in request.form.getlist("child_ids") if x.isdigit()]
+        allowed_child_ids = accessible_child_ids_for_user(current_user)
+        child_ids = [child_id for child_id in child_ids if current_user.is_admin or child_id in allowed_child_ids]
         character_ids = [int(x) for x in request.form.getlist("character_ids") if x.isdigit()]
 
-        cartoon = Cartoon(story_prompt=story_prompt, status="generating")
+        cartoon = Cartoon(
+            story_prompt=story_prompt,
+            status="generating",
+            created_by_user_id=current_user.id if current_user else None,
+        )
         db.session.add(cartoon)
         db.session.flush()
 
@@ -7553,7 +7965,7 @@ def create_app():
 
     @app.route("/cartoons/<int:cartoon_id>")
     def cartoon_detail(cartoon_id):
-        cartoon = Cartoon.query.get_or_404(cartoon_id)
+        cartoon = require_cartoon_access(cartoon_id)
         final_video_url = final_video_url_for_cartoon(cartoon_id)
         pipeline_status = get_pipeline_status(cartoon)
         pipeline_runtime = get_pipeline_runtime(cartoon_id)
@@ -7577,6 +7989,7 @@ def create_app():
         return render_template(
             "cartoon_detail.html",
             cartoon=cartoon,
+            creator_email=user_email_by_id(cartoon.created_by_user_id),
             final_video_url=final_video_url,
             pipeline_status=pipeline_status,
             pipeline_runtime=pipeline_runtime,
@@ -7588,7 +8001,7 @@ def create_app():
 
     @app.route("/cartoons/<int:cartoon_id>/regenerate", methods=["POST"])
     def regenerate_cartoon(cartoon_id):
-        cartoon = Cartoon.query.get_or_404(cartoon_id)
+        cartoon = require_cartoon_access(cartoon_id, manage=True)
         if not app.config.get("OPENAI_API_KEY"):
             flash("OPENAI_API_KEY не задан в .env.", "danger")
             return redirect(url_for("cartoon_detail", cartoon_id=cartoon_id))
@@ -7612,7 +8025,7 @@ def create_app():
 
     @app.route("/cartoons/<int:cartoon_id>/edit", methods=["POST"])
     def edit_cartoon(cartoon_id):
-        cartoon = Cartoon.query.get_or_404(cartoon_id)
+        cartoon = require_cartoon_access(cartoon_id, manage=True)
         story_prompt = request.form.get("story_prompt", "").strip()
         if not story_prompt:
             flash("Идея истории не может быть пустой.", "danger")
@@ -7624,7 +8037,7 @@ def create_app():
 
     @app.route("/cartoons/<int:cartoon_id>/delete", methods=["POST"])
     def delete_cartoon(cartoon_id):
-        cartoon = Cartoon.query.get_or_404(cartoon_id)
+        cartoon = require_cartoon_access(cartoon_id, manage=True)
         db.session.delete(cartoon)
         db.session.commit()
         flash("Мультик удалён.", "success")
@@ -7632,55 +8045,56 @@ def create_app():
 
     @app.route("/cartoons/<int:cartoon_id>/generate-video", methods=["POST"])
     def generate_cartoon_video(cartoon_id):
-        cartoon = Cartoon.query.get_or_404(cartoon_id)
+        cartoon = require_cartoon_access(cartoon_id, manage=True)
         ok, msg = start_pipeline_step_async(cartoon.id, "video", run_step_video)
         flash(msg, "info" if ok else "danger")
         return redirect(url_for("cartoon_detail", cartoon_id=cartoon_id))
 
     @app.route("/cartoons/<int:cartoon_id>/assemble", methods=["POST"])
     def assemble_cartoon(cartoon_id):
-        cartoon = Cartoon.query.get_or_404(cartoon_id)
+        cartoon = require_cartoon_access(cartoon_id, manage=True)
         ok, msg = start_pipeline_step_async(cartoon.id, "assemble", run_step_assemble)
         flash(msg, "info" if ok else "danger")
         return redirect(url_for("cartoon_detail", cartoon_id=cartoon_id))
 
     @app.route("/cartoons/<int:cartoon_id>/step/storyboard", methods=["POST"])
     def step_storyboard(cartoon_id):
-        cartoon = Cartoon.query.get_or_404(cartoon_id)
+        cartoon = require_cartoon_access(cartoon_id, manage=True)
         ok, msg = start_pipeline_step_async(cartoon.id, "storyboard", run_step_storyboard)
         flash(msg, "info" if ok else "danger")
         return redirect(url_for("cartoon_detail", cartoon_id=cartoon_id))
 
     @app.route("/cartoons/<int:cartoon_id>/step/images", methods=["POST"])
     def step_images(cartoon_id):
-        cartoon = Cartoon.query.get_or_404(cartoon_id)
+        cartoon = require_cartoon_access(cartoon_id, manage=True)
         ok, msg = start_pipeline_step_async(cartoon.id, "images", run_step_images)
         flash(msg, "info" if ok else "danger")
         return redirect(url_for("cartoon_detail", cartoon_id=cartoon_id))
 
     @app.route("/cartoons/<int:cartoon_id>/step/audio", methods=["POST"])
     def step_audio(cartoon_id):
-        cartoon = Cartoon.query.get_or_404(cartoon_id)
+        cartoon = require_cartoon_access(cartoon_id, manage=True)
         ok, msg = start_pipeline_step_async(cartoon.id, "audio", run_step_audio)
         flash(msg, "info" if ok else "danger")
         return redirect(url_for("cartoon_detail", cartoon_id=cartoon_id))
 
     @app.route("/cartoons/<int:cartoon_id>/step/video", methods=["POST"])
     def step_video(cartoon_id):
-        cartoon = Cartoon.query.get_or_404(cartoon_id)
+        cartoon = require_cartoon_access(cartoon_id, manage=True)
         ok, msg = start_pipeline_step_async(cartoon.id, "video", run_step_video)
         flash(msg, "info" if ok else "danger")
         return redirect(url_for("cartoon_detail", cartoon_id=cartoon_id))
 
     @app.route("/cartoons/<int:cartoon_id>/step/assemble", methods=["POST"])
     def step_assemble(cartoon_id):
-        cartoon = Cartoon.query.get_or_404(cartoon_id)
+        cartoon = require_cartoon_access(cartoon_id, manage=True)
         ok, msg = start_pipeline_step_async(cartoon.id, "assemble", run_step_assemble)
         flash(msg, "info" if ok else "danger")
         return redirect(url_for("cartoon_detail", cartoon_id=cartoon_id))
 
     @app.route("/api/cartoons/<int:cartoon_id>/pipeline-state")
     def api_pipeline_state(cartoon_id):
+        require_cartoon_access(cartoon_id)
         runtime = get_pipeline_runtime(cartoon_id)
         snapshot = build_pipeline_snapshot(cartoon_id)
         return jsonify({**runtime, **snapshot})
@@ -7711,7 +8125,7 @@ def create_app():
     @app.route("/api/cartoons/<int:cartoon_id>/video-sync")
     def api_video_sync(cartoon_id):
         """Recovery: re-fetch pending video tasks from API and emit socket events."""
-        cartoon = Cartoon.query.get_or_404(cartoon_id)
+        cartoon = require_cartoon_access(cartoon_id)
         for scene in cartoon.scenes:
             if scene.video_status != "pending" or not scene.video_task_id:
                 continue
@@ -7762,7 +8176,7 @@ def create_app():
         avatar that has a task_id. Called automatically from the browser when
         the page has been open for a while without updates.
         """
-        child = Child.query.get_or_404(child_id)
+        child = require_child_access(child_id)
         updated = []
 
         for avatar in child.avatars:
@@ -7806,9 +8220,14 @@ def create_app():
 
     @socketio.on("watch_child")
     def on_watch_child(data):
+        current_user = get_current_user()
         child_id = data.get("child_id")
-        if child_id:
-            join_room(f"child_{child_id}")
+        try:
+            normalized_child_id = int(child_id)
+        except Exception:
+            normalized_child_id = 0
+        if normalized_child_id and user_can_view_child(current_user, db.session.get(Child, normalized_child_id)):
+            join_room(f"child_{normalized_child_id}")
 
     @socketio.on("unwatch_child")
     def on_unwatch_child(data):
@@ -7818,9 +8237,14 @@ def create_app():
 
     @socketio.on("watch_cartoon")
     def on_watch_cartoon(data):
+        current_user = get_current_user()
         cartoon_id = data.get("cartoon_id")
-        if cartoon_id:
-            join_room(f"cartoon_{cartoon_id}")
+        try:
+            normalized_cartoon_id = int(cartoon_id)
+        except Exception:
+            normalized_cartoon_id = 0
+        if normalized_cartoon_id and user_can_view_cartoon(current_user, db.session.get(Cartoon, normalized_cartoon_id)):
+            join_room(f"cartoon_{normalized_cartoon_id}")
 
     @socketio.on("unwatch_cartoon")
     def on_unwatch_cartoon(data):
@@ -7866,10 +8290,13 @@ def create_app():
 
     @socketio.on("watch_template4")
     def on_watch_template4(data):
+        current_user = get_current_user()
         template_name = (data or {}).get("template_name")
         if template_name:
-            join_room(f"template4_{template_name}")
             template_dir = safe_template4_dir(str(template_name))
+            if not template_dir or not user_can_view_template4_dir(current_user, template_dir):
+                return
+            join_room(f"template4_{template_name}")
             scenes = load_template4_scenes(template_dir) if template_dir else []
             project_state = load_template4_project_meta(template_dir) if template_dir else {}
             socketio.emit(
@@ -7890,6 +8317,7 @@ def create_app():
 
     @socketio.on("template4_run_step")
     def on_template4_run_step(data):
+        current_user = get_current_user()
         payload = data or {}
         template_name = str(payload.get("template_name") or "").strip()
         scene_id = str(payload.get("scene_id") or "").strip()
@@ -7898,6 +8326,14 @@ def create_app():
             socketio.emit(
                 "template4_action_result",
                 {"ok": False, "message": "Не переданы template_name / scene_id / step_id."},
+                room=request.sid,
+            )
+            return
+        template_dir = safe_template4_dir(template_name)
+        if not template_dir or not user_can_manage_template4_dir(current_user, template_dir):
+            socketio.emit(
+                "template4_action_result",
+                {"ok": False, "message": "Нет доступа к проекту."},
                 room=request.sid,
             )
             return
@@ -7910,6 +8346,7 @@ def create_app():
 
     @socketio.on("template4_edit_step")
     def on_template4_edit_step(data):
+        current_user = get_current_user()
         payload = data or {}
         template_name = str(payload.get("template_name") or "").strip()
         scene_id = str(payload.get("scene_id") or "").strip()
@@ -7924,6 +8361,14 @@ def create_app():
             socketio.emit(
                 "template4_action_result",
                 {"ok": False, "message": "Не переданы template_name / scene_id / step_id."},
+                room=request.sid,
+            )
+            return
+        template_dir = safe_template4_dir(template_name)
+        if not template_dir or not user_can_manage_template4_dir(current_user, template_dir):
+            socketio.emit(
+                "template4_action_result",
+                {"ok": False, "message": "Нет доступа к проекту."},
                 room=request.sid,
             )
             return
@@ -7946,6 +8391,7 @@ def create_app():
 
     @socketio.on("template4_assemble_project")
     def on_template4_assemble_project(data):
+        current_user = get_current_user()
         payload = data or {}
         template_name = str(payload.get("template_name") or "").strip()
         if not template_name:
@@ -7960,6 +8406,13 @@ def create_app():
             socketio.emit(
                 "template4_action_result",
                 {"ok": False, "message": "Проект не найден."},
+                room=request.sid,
+            )
+            return
+        if not user_can_manage_template4_dir(current_user, template_dir):
+            socketio.emit(
+                "template4_action_result",
+                {"ok": False, "message": "Нет доступа к проекту."},
                 room=request.sid,
             )
             return
